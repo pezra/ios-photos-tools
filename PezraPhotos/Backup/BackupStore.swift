@@ -36,7 +36,8 @@ final class BackupStore: @unchecked Sendable {
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS assets (
                 id TEXT PRIMARY KEY,
-                completed_at REAL NOT NULL
+                completed_at REAL NOT NULL,
+                modified_at REAL
             );
             CREATE TABLE IF NOT EXISTS resources (
                 id TEXT PRIMARY KEY,
@@ -46,17 +47,31 @@ final class BackupStore: @unchecked Sendable {
                 staged_name TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                sha256 TEXT,
+                asset_modified_at REAL
             );
             CREATE INDEX IF NOT EXISTS resources_asset ON resources(asset_id);
             CREATE INDEX IF NOT EXISTS resources_state ON resources(state);
             """, nil, nil, nil)
+        // Columns added after the first version; these fail harmlessly when already present.
+        sqlite3_exec(db, "ALTER TABLE assets ADD COLUMN modified_at REAL", nil, nil, nil)
+        sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN sha256 TEXT", nil, nil, nil)
+        sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN asset_modified_at REAL", nil, nil, nil)
     }
 
     // MARK: - Queries
 
-    func completedAssetIDs() -> Set<String> {
-        locked { Set(query("SELECT id FROM assets") { text($0, 0) ?? "" }) }
+    /// Completed assets mapped to the asset modification date they were backed up at
+    /// (nil if unknown, which forces a recheck).
+    func completedAssets() -> [String: Double?] {
+        locked {
+            let rows = query("SELECT id, modified_at FROM assets") { stmt -> (String, Double?) in
+                let modified = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
+                return (text(stmt, 0) ?? "", modified)
+            }
+            return Dictionary(rows, uniquingKeysWith: { $1 })
+        }
     }
 
     func completedAssetCount() -> Int {
@@ -69,10 +84,11 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func states(forAsset assetID: String) -> [String: ResourceState] {
+    /// State and content hash of the last upload, by resource ID.
+    func resources(forAsset assetID: String) -> [String: (state: ResourceState, sha256: String?)] {
         locked {
-            let rows = query("SELECT id, state FROM resources WHERE asset_id = ?", [assetID]) {
-                (text($0, 0) ?? "", ResourceState(rawValue: Int(sqlite3_column_int($0, 1))) ?? .pending)
+            let rows = query("SELECT id, state, sha256 FROM resources WHERE asset_id = ?", [assetID]) {
+                (text($0, 0) ?? "", (ResourceState(rawValue: Int(sqlite3_column_int($0, 1))) ?? .pending, text($0, 2)))
             }
             return Dictionary(rows, uniquingKeysWith: { $1 })
         }
@@ -99,8 +115,9 @@ final class BackupStore: @unchecked Sendable {
 
     // MARK: - Updates
 
-    /// Records resources for an asset; keys of not-yet-uploaded resources are refreshed.
-    func register(_ rows: [ResourceRow]) {
+    /// Records resources for an asset at its current modification date; keys of not-yet-uploaded
+    /// resources are refreshed.
+    func register(_ rows: [ResourceRow], assetID: String, assetModifiedAt: Double?) {
         locked {
             for row in rows {
                 execute("""
@@ -108,13 +125,14 @@ final class BackupStore: @unchecked Sendable {
                     ON CONFLICT(id) DO UPDATE SET s3_key = excluded.s3_key WHERE state != \(ResourceState.done.rawValue)
                     """, [row.id, row.assetID, row.s3Key, ResourceState.pending.rawValue, now])
             }
+            execute("UPDATE resources SET asset_modified_at = ? WHERE asset_id = ?", [assetModifiedAt, assetID])
         }
     }
 
-    func markUploading(_ id: String, stagedName: String) {
+    func markUploading(_ id: String, stagedName: String, sha256: String?) {
         locked {
-            execute("UPDATE resources SET state = ?, staged_name = ?, updated_at = ? WHERE id = ?",
-                    [ResourceState.uploading.rawValue, stagedName, now, id])
+            execute("UPDATE resources SET state = ?, staged_name = ?, sha256 = ?, updated_at = ? WHERE id = ?",
+                    [ResourceState.uploading.rawValue, stagedName, sha256, now, id])
         }
     }
 
@@ -123,9 +141,7 @@ final class BackupStore: @unchecked Sendable {
             execute("UPDATE resources SET state = ?, staged_name = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
                     [ResourceState.done.rawValue, now, id])
             guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
-            let remaining = query("SELECT COUNT(*) FROM resources WHERE asset_id = ? AND state != ?",
-                                  [assetID, ResourceState.done.rawValue]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
-            if remaining == 0 { completeAsset(assetID) }
+            completeAssetIfFinished(assetID)
         }
     }
 
@@ -146,8 +162,15 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// For assets with nothing to upload.
-    func markAssetComplete(_ assetID: String) {
-        locked { completeAsset(assetID) }
+    func markAssetComplete(_ assetID: String, modifiedAt: Double?) {
+        locked {
+            execute("INSERT OR REPLACE INTO assets (id, completed_at, modified_at) VALUES (?, ?, ?)", [assetID, now, modifiedAt])
+        }
+    }
+
+    /// Marks the asset complete if every one of its resources has uploaded.
+    func markAssetCompleteIfFinished(_ assetID: String) {
+        locked { completeAssetIfFinished(assetID) }
     }
 
     /// Forgets all history so everything is uploaded again (e.g. after switching buckets).
@@ -162,8 +185,14 @@ final class BackupStore: @unchecked Sendable {
 
     private var now: Double { Date().timeIntervalSince1970 }
 
-    private func completeAsset(_ assetID: String) {
-        execute("INSERT OR REPLACE INTO assets (id, completed_at) VALUES (?, ?)", [assetID, now])
+    private func completeAssetIfFinished(_ assetID: String) {
+        let remaining = query("SELECT COUNT(*) FROM resources WHERE asset_id = ? AND state != ?",
+                              [assetID, ResourceState.done.rawValue]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
+        guard remaining == 0 else { return }
+        execute("""
+            INSERT OR REPLACE INTO assets (id, completed_at, modified_at)
+            SELECT ?, ?, MAX(asset_modified_at) FROM resources WHERE asset_id = ?
+            """, [assetID, now, assetID])
     }
 
     private func locked<T>(_ body: () -> T) -> T {

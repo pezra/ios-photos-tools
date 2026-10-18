@@ -43,12 +43,15 @@ Turning on bucket versioning (or Object Lock) protects the backup if the keys ev
   iCloud if necessary) to a staging folder, and hands it to a background `URLSession` with a 7-day
   presigned PUT URL, so iOS can finish the upload even after the app is suspended.
 - `BackupStore` (SQLite) records which files have uploaded. Failed files are retried on the next run.
+- Photos modified since their last backup are checked again. An edited version is re-uploaded
+  when its contents have changed (compared by SHA-256).
 - Backups run when the app opens and, through `BGProcessingTask`, whenever iOS grants
   background time (charging or not).
 
 ## Known limitations
 
 - Each file is sent in a single PUT, so files over 5 GB fail (no multipart upload).
-- If you edit a photo after it's been backed up, the new edit isn't uploaded.
+- Re-editing a photo overwrites its `FullSizeRender` in the bucket. Turn on bucket versioning to
+  keep earlier edits. (The original is never overwritten.)
 - Deleting a photo on the phone doesn't delete it from the bucket (on purpose).
 - Hidden photos are included; to exclude them, set `includeHiddenAssets` in `PhotoLibrary.swift`.

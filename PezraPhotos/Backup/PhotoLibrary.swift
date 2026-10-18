@@ -9,6 +9,9 @@ enum PhotoLibrary {
         .fullSizePhoto, .fullSizeVideo, .fullSizePairedVideo,
     ]
 
+    /// Rendered edits. These keep the same file name each time the photo is re-edited.
+    static let editedTypes: Set<PHAssetResourceType> = [.fullSizePhoto, .fullSizeVideo, .fullSizePairedVideo]
+
     static var isAuthorized: Bool {
         switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
         case .authorized, .limited: return true

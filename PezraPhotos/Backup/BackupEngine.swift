@@ -63,10 +63,13 @@ actor BackupEngine {
         await report(phase: "Checking library…", running: true)
         await reconcileWithUploadSession()
 
-        let done = store.completedAssetIDs()
+        // New assets, plus completed ones modified since (e.g. edited) so new edits get uploaded.
+        let completed = store.completedAssets()
         var pending: [PHAsset] = []
         PhotoLibrary.fetchAllAssets().enumerateObjects { asset, _, _ in
-            if !done.contains(asset.localIdentifier) { pending.append(asset) }
+            guard let backedUpAt = completed[asset.localIdentifier] else { return pending.append(asset) }
+            if let backedUpAt, let modified = asset.modificationDate?.timeIntervalSince1970, modified <= backedUpAt { return }
+            pending.append(asset)
         }
         await MainActor.run { BackupStatus.shared.refresh() }
 
@@ -90,29 +93,42 @@ actor BackupEngine {
     }
 
     private func stage(_ asset: PHAsset, client: S3Client, settings: SettingsStore.Snapshot) async {
+        let assetID = asset.localIdentifier
+        let modifiedAt = asset.modificationDate?.timeIntervalSince1970
         let resources = PhotoLibrary.backupResources(for: asset, prefix: settings.prefix)
         guard !resources.isEmpty else {
-            store.markAssetComplete(asset.localIdentifier)
+            store.markAssetComplete(assetID, modifiedAt: modifiedAt)
             return
         }
-        store.register(resources.map(\.1))
-        let states = store.states(forAsset: asset.localIdentifier)
+        store.register(resources.map(\.1), assetID: assetID, assetModifiedAt: modifiedAt)
+        let existing = store.resources(forAsset: assetID)
 
         for (resource, row) in resources {
             if Task.isCancelled { return }
-            if states[row.id] == .done || states[row.id] == .uploading { continue }
+            let previous = existing[row.id]
+            if previous?.state == .uploading { continue }
+            // Originals never change, but an edited render keeps its name when re-edited, so it
+            // is re-exported and compared by content.
+            let isEdit = PhotoLibrary.editedTypes.contains(resource.type)
+            if previous?.state == .done && !isEdit { continue }
 
             let stagedName = UUID().uuidString
             let file = Staging.url(for: stagedName)
+            let sha256: String?
             do {
                 try await PhotoLibrary.export(resource, to: file)
+                sha256 = isEdit ? try Staging.sha256(of: file) : nil
             } catch {
                 Staging.remove(stagedName)
                 store.markFailed(row.id, error: "Couldn't read from photo library: \(error.localizedDescription)")
                 continue
             }
+            if previous?.state == .done && previous?.sha256 == sha256 {
+                Staging.remove(stagedName)
+                continue
+            }
             let url = client.presignedURL(method: "PUT", key: row.s3Key, expiresIn: urlLifetime)
-            store.markUploading(row.id, stagedName: stagedName)
+            store.markUploading(row.id, stagedName: stagedName, sha256: sha256)
             UploadSession.shared.upload(
                 file: file,
                 to: url,
@@ -121,6 +137,8 @@ actor BackupEngine {
                 allowCellular: settings.allowCellular
             )
         }
+        // Records the new modification date when nothing needed uploading.
+        store.markAssetCompleteIfFinished(assetID)
         await MainActor.run { BackupStatus.shared.refreshCounts() }
     }
 
