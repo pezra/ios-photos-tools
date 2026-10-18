@@ -10,6 +10,7 @@ private enum Key {
     static let usePathStyle = "usePathStyle"
     static let allowCellular = "allowCellular"
     static let autoBackup = "autoBackup"
+    static let driveAutoBackup = "driveAutoBackup"
     static let accessKeyID = "accessKeyID"
     static let secretAccessKey = "secretAccessKey"
 }
@@ -26,6 +27,9 @@ final class SettingsStore {
     var usePathStyle: Bool { didSet { Self.defaults.set(usePathStyle, forKey: Key.usePathStyle) } }
     var allowCellular: Bool { didSet { Self.defaults.set(allowCellular, forKey: Key.allowCellular) } }
     var autoBackup: Bool { didSet { Self.defaults.set(autoBackup, forKey: Key.autoBackup) } }
+    var driveAutoBackup: Bool { didSet { Self.defaults.set(driveAutoBackup, forKey: Key.driveAutoBackup) } }
+    /// The backup drive folder's display name, or nil if none is set up.
+    private(set) var driveName: String?
     var accessKeyID: String { didSet { Keychain.set(accessKeyID, for: Key.accessKeyID) } }
     var secretAccessKey: String { didSet { Keychain.set(secretAccessKey, for: Key.secretAccessKey) } }
 
@@ -39,6 +43,8 @@ final class SettingsStore {
         usePathStyle = d.bool(forKey: Key.usePathStyle)
         allowCellular = d.bool(forKey: Key.allowCellular)
         autoBackup = d.bool(forKey: Key.autoBackup)
+        driveAutoBackup = d.bool(forKey: Key.driveAutoBackup)
+        driveName = DriveDestination.name
         accessKeyID = Keychain.get(Key.accessKeyID) ?? ""
         secretAccessKey = Keychain.get(Key.secretAccessKey) ?? ""
     }
@@ -49,7 +55,24 @@ final class SettingsStore {
             && URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
 
+    func setDrive(folder: URL) throws {
+        try DriveDestination.configure(folder: folder)
+        BackupStore.shared.forgetDrives(except: DriveDestination.id)
+        driveName = DriveDestination.name
+    }
+
+    func forgetDrive() {
+        DriveDestination.forget()
+        BackupStore.shared.forgetDrives(except: nil)
+        driveName = nil
+    }
+
     // MARK: - Thread-safe access for the backup engine
+
+    static var driveAutoBackup: Bool {
+        registerDefaults()
+        return defaults.bool(forKey: Key.driveAutoBackup)
+    }
 
     struct Snapshot: Sendable {
         let s3: S3Config
@@ -95,6 +118,7 @@ final class SettingsStore {
             Key.usePathStyle: true,
             Key.allowCellular: false,
             Key.autoBackup: true,
+            Key.driveAutoBackup: true,
         ])
     }
 }

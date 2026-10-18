@@ -1,5 +1,6 @@
 import S3Kit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @Environment(SettingsStore.self) private var settings
@@ -7,6 +8,8 @@ struct SettingsView: View {
     @State private var testResult: Result<String, Error>?
     @State private var isTesting = false
     @State private var confirmingReset = false
+    @State private var choosingDriveFolder = false
+    @State private var driveError: String?
 
     var body: some View {
         @Bindable var settings = settings
@@ -73,6 +76,24 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    if let driveName = settings.driveName {
+                        LabeledContent("Folder", value: driveName)
+                        Toggle("Back up when connected", isOn: $settings.driveAutoBackup)
+                        Button("Choose a different folder") { choosingDriveFolder = true }
+                        Button("Stop backing up to this drive", role: .destructive) { settings.forgetDrive() }
+                    } else {
+                        Button("Choose folder on drive…") { choosingDriveFolder = true }
+                    }
+                    if let driveError {
+                        Label(driveError, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("USB drive")
+                } footer: {
+                    Text("Plug in the drive, then pick a folder on it. Photos are copied there whenever the drive is plugged in while Photo Backup is open, and keep copying if you leave the app.")
+                }
+
+                Section {
                     Button("Forget backup history", role: .destructive) { confirmingReset = true }
                 } footer: {
                     Text("Makes the next backup upload everything again. Use this after switching to a different bucket.")
@@ -82,6 +103,14 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 Button("Done") { dismiss() }
+            }
+            .fileImporter(isPresented: $choosingDriveFolder, allowedContentTypes: [.folder]) { result in
+                do {
+                    try settings.setDrive(folder: result.get())
+                    driveError = nil
+                } catch {
+                    driveError = error.localizedDescription
+                }
             }
             .confirmationDialog("Upload your whole library again?", isPresented: $confirmingReset, titleVisibility: .visible) {
                 Button("Forget backup history", role: .destructive) {

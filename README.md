@@ -48,6 +48,22 @@ Turning on bucket versioning (or Object Lock) protects the backup if the keys ev
 - Backups run when the app opens and, through `BGProcessingTask`, whenever iOS grants
   background time (charging or not).
 
+## USB drive
+
+Photos can also be copied to a USB drive (or any folder in Files). Plug in the drive, open
+Settings → *USB drive* → **Choose folder on drive…**, and pick a folder. The drive gets the same
+layout as the bucket, without the folder prefix.
+
+- iOS doesn't tell apps when a drive is plugged in and won't launch an app for one, so the app
+  checks for the drive every few seconds **while it's open**. Plug the drive in, open Photo Backup,
+  and copying starts on its own.
+- Once started, the copy keeps going after you leave the app (`BGContinuedProcessingTask`, with
+  progress shown by the system) until it finishes or you stop it.
+- If the drive happens to be plugged in when iOS runs a background backup, it's copied to then too.
+- Files are written under a temporary name and renamed when complete, so a partly written file never
+  has the real name. Originals already on the drive are skipped; edited versions are rewritten when
+  a photo changes.
+
 ## Known limitations
 
 - Each file is sent in a single PUT, so files over 5 GB fail (no multipart upload).

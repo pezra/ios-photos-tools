@@ -6,19 +6,23 @@ struct IOSPhotosToolsApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var status = BackupStatus.shared
     @State private var settings = SettingsStore()
+    @State private var drive = DriveStatus.shared
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(status)
                 .environment(settings)
+                .environment(drive)
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
                 status.refresh()
                 if settings.autoBackup { BackupEngine.start() }
+                DriveMonitor.shared.start()
             case .background:
+                DriveMonitor.shared.stop()
                 BackgroundTasks.schedule()
             default:
                 break

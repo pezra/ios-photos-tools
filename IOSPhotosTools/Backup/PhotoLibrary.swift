@@ -75,4 +75,42 @@ enum PhotoLibrary {
             }
         }
     }
+
+    /// Like `export`, but writes the bytes from this process, so files on a security-scoped
+    /// location such as a USB drive don't depend on the Photos service being able to reach it.
+    static func stream(_ resource: PHAssetResource, to url: URL) async throws {
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+
+        final class Request: @unchecked Sendable {
+            var id: PHAssetResourceDataRequestID = PHInvalidAssetResourceDataRequestID
+            var writeError: Error?
+        }
+        let request = Request()
+        let manager = PHAssetResourceManager.default()
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            // The handlers are called one at a time, so `request` needs no lock.
+            request.id = manager.requestData(for: resource, options: options) { data in
+                guard request.writeError == nil else { return }
+                do {
+                    try handle.write(contentsOf: data)
+                } catch {
+                    request.writeError = error
+                    manager.cancelDataRequest(request.id)
+                }
+            } completionHandler: { error in
+                if let error = request.writeError ?? error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+        try handle.synchronize()
+    }
 }

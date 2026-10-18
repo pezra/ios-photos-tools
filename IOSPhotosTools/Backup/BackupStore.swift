@@ -53,6 +53,14 @@ final class BackupStore: @unchecked Sendable {
             );
             CREATE INDEX IF NOT EXISTS resources_asset ON resources(asset_id);
             CREATE INDEX IF NOT EXISTS resources_state ON resources(state);
+            CREATE TABLE IF NOT EXISTS drive_assets (
+                drive_id TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                completed_at REAL NOT NULL,
+                modified_at REAL,
+                PRIMARY KEY (drive_id, asset_id)
+            );
+            CREATE TEMP TABLE library (id TEXT PRIMARY KEY);
             """, nil, nil, nil)
         // Columns added after the first version; these fail harmlessly when already present.
         sqlite3_exec(db, "ALTER TABLE assets ADD COLUMN modified_at REAL", nil, nil, nil)
@@ -72,10 +80,6 @@ final class BackupStore: @unchecked Sendable {
             }
             return Dictionary(rows, uniquingKeysWith: { $1 })
         }
-    }
-
-    func completedAssetCount() -> Int {
-        locked { query("SELECT COUNT(*) FROM assets") { Int(sqlite3_column_int64($0, 0)) }.first ?? 0 }
     }
 
     func count(_ state: ResourceState) -> Int {
@@ -178,6 +182,70 @@ final class BackupStore: @unchecked Sendable {
         locked {
             execute("DELETE FROM resources WHERE state != ?", [ResourceState.uploading.rawValue])
             execute("DELETE FROM assets")
+        }
+    }
+
+    // MARK: - USB drive copies
+
+    /// Assets copied to the drive, mapped to the asset modification date they were copied at.
+    func completedDriveAssets(driveID: String) -> [String: Double?] {
+        locked {
+            let rows = query("SELECT asset_id, modified_at FROM drive_assets WHERE drive_id = ?", [driveID]) { stmt -> (String, Double?) in
+                let modified = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
+                return (text(stmt, 0) ?? "", modified)
+            }
+            return Dictionary(rows, uniquingKeysWith: { $1 })
+        }
+    }
+
+    func markDriveAssetComplete(_ assetID: String, driveID: String, modifiedAt: Double?) {
+        locked {
+            execute("INSERT OR REPLACE INTO drive_assets (drive_id, asset_id, completed_at, modified_at) VALUES (?, ?, ?, ?)",
+                    [driveID, assetID, now, modifiedAt])
+        }
+    }
+
+    /// Forgets what was copied to drives other than `driveID` (all drives if nil).
+    func forgetDrives(except driveID: String?) {
+        locked { execute("DELETE FROM drive_assets WHERE drive_id IS NOT ?", [driveID]) }
+    }
+
+    // MARK: - Coverage
+
+    /// How many photos in the library are backed up where.
+    struct Coverage: Equatable {
+        var total = 0
+        var cloud = 0
+        var drive = 0
+        var both = 0
+
+        var cloudOnly: Int { cloud - both }
+        var driveOnly: Int { drive - both }
+        var nowhere: Int { total - cloud - drive + both }
+    }
+
+    /// Replaces the IDs of the assets currently in the photo library, which `coverage` counts
+    /// against (so deleted photos aren't counted).
+    func setLibraryAssets(_ ids: [String]) {
+        locked {
+            execute("BEGIN")
+            execute("DELETE FROM library")
+            for id in ids { execute("INSERT OR IGNORE INTO library (id) VALUES (?)", [id]) }
+            execute("COMMIT")
+        }
+    }
+
+    func coverage(driveID: String?) -> Coverage {
+        locked {
+            query("""
+                SELECT COUNT(*), COUNT(a.id), COUNT(d.asset_id), SUM(a.id IS NOT NULL AND d.asset_id IS NOT NULL)
+                FROM library l
+                LEFT JOIN assets a ON a.id = l.id
+                LEFT JOIN drive_assets d ON d.drive_id = ? AND d.asset_id = l.id
+                """, [driveID]) {
+                Coverage(total: Int(sqlite3_column_int64($0, 0)), cloud: Int(sqlite3_column_int64($0, 1)),
+                         drive: Int(sqlite3_column_int64($0, 2)), both: Int(sqlite3_column_int64($0, 3)))
+            }.first ?? Coverage()
         }
     }
 

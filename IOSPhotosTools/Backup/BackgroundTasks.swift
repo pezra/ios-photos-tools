@@ -1,6 +1,7 @@
 import BackgroundTasks
 
 /// Schedules backup passes whenever iOS lets the app run in the background (on battery or charging).
+/// If the USB drive happens to be plugged in then, it's backed up too.
 enum BackgroundTasks {
     static let backupTaskID = "org.barelyenough.ios-photos-tools.backup"
 
@@ -28,9 +29,15 @@ enum BackgroundTasks {
 
     private static func handle(_ task: BGProcessingTask) {
         schedule()
-        task.expirationHandler = { BackupEngine.stop() }
+        task.expirationHandler = {
+            BackupEngine.stop()
+            DriveBackupEngine.stop()
+        }
         Task {
+            async let drive: Void = SettingsStore.driveAutoBackup && DriveDestination.isConnected
+                ? DriveBackupEngine.shared.run() : ()
             await BackupEngine.shared.run()
+            await drive
             task.setTaskCompleted(success: true)
         }
     }
