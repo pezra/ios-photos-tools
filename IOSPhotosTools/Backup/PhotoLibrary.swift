@@ -28,6 +28,23 @@ enum PhotoLibrary {
         return PHAsset.fetchAssets(with: options)
     }
 
+    /// Assets that need backing up, given `completed` (asset ID → the asset's modification date
+    /// when it was backed up), and the IDs of every asset in the library.
+    ///
+    /// New assets are included, plus completed ones modified since (e.g. edited) so new edits are
+    /// backed up, and ones whose date is unknown.
+    static func pendingAssets(completed: [String: Double?]) -> (pending: [PHAsset], allIDs: [String]) {
+        var pending: [PHAsset] = []
+        var ids: [String] = []
+        fetchAllAssets().enumerateObjects { asset, _, _ in
+            ids.append(asset.localIdentifier)
+            guard let backedUpAt = completed[asset.localIdentifier] else { return pending.append(asset) }
+            if let backedUpAt, let modified = asset.modificationDate?.timeIntervalSince1970, modified <= backedUpAt { return }
+            pending.append(asset)
+        }
+        return (pending, ids)
+    }
+
     /// The resources of `asset` to back up, paired with their stable ID and object key.
     static func backupResources(for asset: PHAsset, prefix: String) -> [(PHAssetResource, ResourceRow)] {
         // localIdentifier looks like "UUID/L0/001"; the UUID alone is unique and path-safe.
@@ -85,31 +102,55 @@ enum PhotoLibrary {
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
 
+        /// Tracks the request so it can be cancelled from the write handler or when the task is
+        /// cancelled, which may happen before `requestData` has returned its ID.
         final class Request: @unchecked Sendable {
-            var id: PHAssetResourceDataRequestID = PHInvalidAssetResourceDataRequestID
+            private let lock = NSLock()
+            private var id: PHAssetResourceDataRequestID?
+            private var isCancelled = false
+            /// Only touched by the data and completion handlers, which run one at a time.
             var writeError: Error?
+
+            func started(_ id: PHAssetResourceDataRequestID) {
+                let cancelNow = lock.withLock {
+                    self.id = id
+                    return isCancelled
+                }
+                if cancelNow { PHAssetResourceManager.default().cancelDataRequest(id) }
+            }
+
+            func cancel() {
+                let id = lock.withLock {
+                    isCancelled = true
+                    return self.id
+                }
+                if let id { PHAssetResourceManager.default().cancelDataRequest(id) }
+            }
         }
         let request = Request()
-        let manager = PHAssetResourceManager.default()
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            // The handlers are called one at a time, so `request` needs no lock.
-            request.id = manager.requestData(for: resource, options: options) { data in
-                guard request.writeError == nil else { return }
-                do {
-                    try handle.write(contentsOf: data)
-                } catch {
-                    request.writeError = error
-                    manager.cancelDataRequest(request.id)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let id = PHAssetResourceManager.default().requestData(for: resource, options: options) { data in
+                    guard request.writeError == nil else { return }
+                    do {
+                        try handle.write(contentsOf: data)
+                    } catch {
+                        request.writeError = error
+                        request.cancel()
+                    }
+                } completionHandler: { error in
+                    if let error = request.writeError ?? error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
                 }
-            } completionHandler: { error in
-                if let error = request.writeError ?? error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
+                request.started(id)
             }
+        } onCancel: {
+            request.cancel()
         }
         try handle.synchronize()
     }

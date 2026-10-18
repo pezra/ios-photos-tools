@@ -76,13 +76,8 @@ actor DriveBackupEngine {
         defer { DriveDestination.close(root) }
 
         await report(phase: "Checking library…", running: true, startingPass: true)
-        let completed = store.completedDriveAssets(driveID: driveID)
-        var pending: [PHAsset] = []
-        PhotoLibrary.fetchAllAssets().enumerateObjects { asset, _, _ in
-            guard let copiedAt = completed[asset.localIdentifier] else { return pending.append(asset) }
-            if let copiedAt, let modified = asset.modificationDate?.timeIntervalSince1970, modified <= copiedAt { return }
-            pending.append(asset)
-        }
+        let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedDriveAssets(driveID: driveID))
+        store.setLibraryAssets(libraryIDs)
         setProgress(0, of: pending.count)
 
         var failed = 0
@@ -131,10 +126,13 @@ actor DriveBackupEngine {
                 }
             } catch {
                 try? fm.removeItem(at: partial)
+                // Pausing interrupts the file being copied; that isn't a failure.
+                if Task.isCancelled { return nil }
                 firstError = firstError ?? error
             }
         }
-        if firstError == nil && !Task.isCancelled {
+        // The drive may have been switched or removed in settings since the pass started.
+        if firstError == nil && !Task.isCancelled && DriveDestination.id == driveID {
             store.markDriveAssetComplete(asset.localIdentifier, driveID: driveID,
                                          modifiedAt: asset.modificationDate?.timeIntervalSince1970)
         }

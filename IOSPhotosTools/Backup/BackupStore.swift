@@ -23,6 +23,7 @@ final class BackupStore: @unchecked Sendable {
 
     private var db: OpaquePointer?
     private let lock = NSLock()
+    private var libraryLoaded = false
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     private init() {
@@ -213,7 +214,7 @@ final class BackupStore: @unchecked Sendable {
     // MARK: - Coverage
 
     /// How many photos in the library are backed up where.
-    struct Coverage: Equatable {
+    struct Coverage: Equatable, Codable {
         var total = 0
         var cloud = 0
         var drive = 0
@@ -230,14 +231,24 @@ final class BackupStore: @unchecked Sendable {
         locked {
             execute("BEGIN")
             execute("DELETE FROM library")
-            for id in ids { execute("INSERT OR IGNORE INTO library (id) VALUES (?)", [id]) }
+            if let insert = prepare("INSERT OR IGNORE INTO library (id) VALUES (?)", []) {
+                for id in ids {
+                    sqlite3_bind_text(insert, 1, id, -1, Self.transient)
+                    sqlite3_step(insert)
+                    sqlite3_reset(insert)
+                }
+                sqlite3_finalize(insert)
+            }
             execute("COMMIT")
+            libraryLoaded = true
         }
     }
 
-    func coverage(driveID: String?) -> Coverage {
+    /// Nil until the library has been listed, when every count would be zero.
+    func coverage(driveID: String?) -> Coverage? {
         locked {
-            query("""
+            guard libraryLoaded else { return nil }
+            return query("""
                 SELECT COUNT(*), COUNT(a.id), COUNT(d.asset_id), SUM(a.id IS NOT NULL AND d.asset_id IS NOT NULL)
                 FROM library l
                 LEFT JOIN assets a ON a.id = l.id

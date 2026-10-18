@@ -63,15 +63,9 @@ actor BackupEngine {
         await report(phase: "Checking library…", running: true)
         await reconcileWithUploadSession()
 
-        // New assets, plus completed ones modified since (e.g. edited) so new edits get uploaded.
-        let completed = store.completedAssets()
-        var pending: [PHAsset] = []
-        PhotoLibrary.fetchAllAssets().enumerateObjects { asset, _, _ in
-            guard let backedUpAt = completed[asset.localIdentifier] else { return pending.append(asset) }
-            if let backedUpAt, let modified = asset.modificationDate?.timeIntervalSince1970, modified <= backedUpAt { return }
-            pending.append(asset)
-        }
-        await MainActor.run { BackupStatus.shared.refresh() }
+        let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedAssets())
+        store.setLibraryAssets(libraryIDs)
+        await MainActor.run { BackupStatus.shared.refreshCounts() }
 
         for (index, asset) in pending.enumerated() {
             await waitForUploadSlot()

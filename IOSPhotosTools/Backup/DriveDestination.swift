@@ -18,8 +18,13 @@ enum DriveDestination {
     static var id: String? { defaults.string(forKey: Key.id) }
     static var name: String? { defaults.string(forKey: Key.name) }
 
-    /// Remembers `folder` (as returned by the document picker) as the backup destination.
+    /// Remembers `folder` (as returned by the document picker) as the backup destination. Picking
+    /// the current folder again keeps its copy history.
     static func configure(folder: URL) throws {
+        let current = open()
+        defer { current.map(close) }
+        let isSameFolder = current?.standardizedFileURL.path == folder.standardizedFileURL.path
+
         let accessing = folder.startAccessingSecurityScopedResource()
         defer { if accessing { folder.stopAccessingSecurityScopedResource() } }
         let bookmark = try folder.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
@@ -28,7 +33,9 @@ enum DriveDestination {
 
         defaults.set(bookmark, forKey: Key.bookmark)
         defaults.set(name, forKey: Key.name)
-        defaults.set(UUID().uuidString, forKey: Key.id)
+        if !isSameFolder || id == nil {
+            defaults.set(UUID().uuidString, forKey: Key.id)
+        }
     }
 
     static func forget() {

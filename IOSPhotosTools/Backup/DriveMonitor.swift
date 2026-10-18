@@ -17,6 +17,12 @@ final class DriveMonitor {
             // Starts out false so a drive that's already plugged in is backed up when the app opens.
             var wasConnected = false
             while !Task.isCancelled {
+                // A pass in progress has the drive open, and notices itself if it goes away.
+                if DriveStatus.shared.isRunning {
+                    wasConnected = true
+                    try? await Task.sleep(for: interval)
+                    continue
+                }
                 let isConnected = await Task.detached { DriveDestination.isConnected }.value
                 DriveStatus.shared.isConnected = isConnected
                 if isConnected && !wasConnected && SettingsStore.driveAutoBackup {

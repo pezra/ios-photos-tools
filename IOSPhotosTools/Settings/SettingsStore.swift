@@ -56,12 +56,14 @@ final class SettingsStore {
     }
 
     func setDrive(folder: URL) throws {
+        DriveBackupEngine.stop()
         try DriveDestination.configure(folder: folder)
         BackupStore.shared.forgetDrives(except: DriveDestination.id)
         driveName = DriveDestination.name
     }
 
     func forgetDrive() {
+        DriveBackupEngine.stop()
         DriveDestination.forget()
         BackupStore.shared.forgetDrives(except: nil)
         driveName = nil
