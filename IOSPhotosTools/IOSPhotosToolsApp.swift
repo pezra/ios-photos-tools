@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct PezraPhotosApp: App {
+struct IOSPhotosToolsApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
     @State private var status = BackupStatus.shared

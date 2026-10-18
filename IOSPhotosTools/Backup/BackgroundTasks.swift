@@ -2,7 +2,7 @@ import BackgroundTasks
 
 /// Schedules backup passes whenever iOS lets the app run in the background (on battery or charging).
 enum BackgroundTasks {
-    static let backupTaskID = "org.barelyenough.PezraPhotos.backup"
+    static let backupTaskID = "org.barelyenough.ios-photos-tools.backup"
 
     /// Must be called before the app finishes launching.
     static func register() {

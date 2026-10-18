@@ -4,7 +4,7 @@ import Security
 /// Minimal generic-password Keychain wrapper. Items stay readable after first unlock so
 /// background backups work while the phone is locked.
 enum Keychain {
-    private static let service = Bundle.main.bundleIdentifier ?? "PezraPhotos"
+    private static let service = Bundle.main.bundleIdentifier ?? "IOSPhotosTools"
 
     static func get(_ account: String) -> String? {
         let query: [String: Any] = [

@@ -4,7 +4,7 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>org.barelyenough.PezraPhotos.backup</string>
+		<string>org.barelyenough.ios-photos-tools.backup</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

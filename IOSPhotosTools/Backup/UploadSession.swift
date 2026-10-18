@@ -3,7 +3,7 @@ import S3Kit
 
 /// Wraps a background `URLSession` so uploads keep going while the app is suspended or terminated.
 final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    static let identifier = "org.barelyenough.PezraPhotos.uploads"
+    static let identifier = "org.barelyenough.ios-photos-tools.uploads"
     static let shared = UploadSession()
 
     private(set) var session: URLSession!

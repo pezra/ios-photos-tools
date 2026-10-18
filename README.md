@@ -5,7 +5,7 @@ RAW files and edited versions — to an S3 or S3-compatible bucket.
 
 ## Running it
 
-1. Open `PezraPhotos.xcodeproj` in Xcode.
+1. Open `IOSPhotosTools.xcodeproj` in Xcode.
 2. Under *Signing & Capabilities*, pick your team (change the bundle ID if it clashes).
 3. Run it on your phone, tap the gear, and enter the endpoint, region, bucket and keys.
    Tap **Test connection**.

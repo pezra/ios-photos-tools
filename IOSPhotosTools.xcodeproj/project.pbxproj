@@ -11,14 +11,14 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		A1B2C3D40000000000000002 /* PezraPhotos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PezraPhotos.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D40000000000000002 /* IOSPhotosTools.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = IOSPhotosTools.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1B2C3D40000000000000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		A1B2C3D40000000000000003 /* PezraPhotos */ = {
+		A1B2C3D40000000000000003 /* IOSPhotosTools */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = PezraPhotos;
+			path = IOSPhotosTools;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -38,7 +38,7 @@
 		A1B2C3D40000000000000005 = {
 			isa = PBXGroup;
 			children = (
-				A1B2C3D40000000000000003 /* PezraPhotos */,
+				A1B2C3D40000000000000003 /* IOSPhotosTools */,
 				A1B2C3D40000000000000012 /* Info.plist */,
 				A1B2C3D40000000000000006 /* Products */,
 			);
@@ -47,7 +47,7 @@
 		A1B2C3D40000000000000006 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A1B2C3D40000000000000002 /* PezraPhotos.app */,
+				A1B2C3D40000000000000002 /* IOSPhotosTools.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -55,9 +55,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A1B2C3D40000000000000007 /* PezraPhotos */ = {
+		A1B2C3D40000000000000007 /* IOSPhotosTools */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A1B2C3D40000000000000010 /* Build configuration list for PBXNativeTarget "PezraPhotos" */;
+			buildConfigurationList = A1B2C3D40000000000000010 /* Build configuration list for PBXNativeTarget "IOSPhotosTools" */;
 			buildPhases = (
 				A1B2C3D40000000000000008 /* Sources */,
 				A1B2C3D40000000000000004 /* Frameworks */,
@@ -68,14 +68,14 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				A1B2C3D40000000000000003 /* PezraPhotos */,
+				A1B2C3D40000000000000003 /* IOSPhotosTools */,
 			);
-			name = PezraPhotos;
+			name = IOSPhotosTools;
 			packageProductDependencies = (
 				A1B2C3D40000000000000020 /* S3Kit */,
 			);
-			productName = PezraPhotos;
-			productReference = A1B2C3D40000000000000002 /* PezraPhotos.app */;
+			productName = IOSPhotosTools;
+			productReference = A1B2C3D40000000000000002 /* IOSPhotosTools.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -93,7 +93,7 @@
 					};
 				};
 			};
-			buildConfigurationList = A1B2C3D4000000000000000B /* Build configuration list for PBXProject "PezraPhotos" */;
+			buildConfigurationList = A1B2C3D4000000000000000B /* Build configuration list for PBXProject "IOSPhotosTools" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -110,7 +110,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A1B2C3D40000000000000007 /* PezraPhotos */,
+				A1B2C3D40000000000000007 /* IOSPhotosTools */,
 			);
 		};
 /* End PBXProject section */
@@ -214,7 +214,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.barelyenough.PezraPhotos;
+				PRODUCT_BUNDLE_IDENTIFIER = org.barelyenough.ios-photos-tools;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -243,7 +243,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.barelyenough.PezraPhotos;
+				PRODUCT_BUNDLE_IDENTIFIER = org.barelyenough.ios-photos-tools;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -254,7 +254,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A1B2C3D4000000000000000B /* Build configuration list for PBXProject "PezraPhotos" */ = {
+		A1B2C3D4000000000000000B /* Build configuration list for PBXProject "IOSPhotosTools" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A1B2C3D4000000000000000C /* Debug */,
@@ -263,7 +263,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		A1B2C3D40000000000000010 /* Build configuration list for PBXNativeTarget "PezraPhotos" */ = {
+		A1B2C3D40000000000000010 /* Build configuration list for PBXNativeTarget "IOSPhotosTools" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A1B2C3D4000000000000000E /* Debug */,
