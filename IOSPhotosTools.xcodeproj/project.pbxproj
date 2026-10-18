@@ -203,8 +203,8 @@
 				DEVELOPMENT_TEAM = 8P3529RVD8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Photo Backup";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Photo Backup reads your photos and videos so it can copy them to your S3 bucket or USB drive.";
+				INFOPLIST_KEY_CFBundleDisplayName = "Photos Tools";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Photos Tools reads your photos and videos so it can copy them to your S3 bucket or USB drive.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -237,8 +237,8 @@
 				DEVELOPMENT_TEAM = 8P3529RVD8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Photo Backup";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Photo Backup reads your photos and videos so it can copy them to your S3 bucket or USB drive.";
+				INFOPLIST_KEY_CFBundleDisplayName = "Photos Tools";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Photos Tools reads your photos and videos so it can copy them to your S3 bucket or USB drive.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

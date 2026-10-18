@@ -90,7 +90,7 @@ struct SettingsView: View {
                 } header: {
                     Text("USB drive")
                 } footer: {
-                    Text("Plug in the drive, then pick a folder on it. Photos are copied there whenever the drive is plugged in while Photo Backup is open, and keep copying if you leave the app.")
+                    Text("Plug in the drive, then pick a folder on it. Photos are copied there whenever the drive is plugged in while Photos Tools is open, and keep copying if you leave the app.")
                 }
 
                 Section {
@@ -128,7 +128,7 @@ struct SettingsView: View {
         do {
             let client = try S3Client(config: snapshot.s3)
             let key = [snapshot.prefix, ".backup-test"].filter { !$0.isEmpty }.joined(separator: "/")
-            try await client.putObject(key: key, data: Data("Photo Backup connection test\n".utf8), contentType: "text/plain")
+            try await client.putObject(key: key, data: Data("Photos Tools connection test\n".utf8), contentType: "text/plain")
             testResult = .success("Wrote \(key)")
         } catch {
             testResult = .failure(error)

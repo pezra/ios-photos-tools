@@ -26,7 +26,7 @@ struct ContentView: View {
                             }
                         }
                     } footer: {
-                        Text("Photo Backup needs full access to your library to back it up.")
+                        Text("Photos Tools needs full access to your library to back it up.")
                     }
                 } else if status.authorization == .limited {
                     Section {
@@ -56,7 +56,7 @@ struct ContentView: View {
                     Text("Photos you delete stay in your bucket if they've already been backed up.")
                 }
             }
-            .navigationTitle("Photo Backup")
+            .navigationTitle("Photos Tools")
             .toolbar {
                 Button {
                     showingSettings = true

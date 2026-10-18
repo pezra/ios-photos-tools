@@ -1,7 +1,14 @@
-# Photo Backup
+# Photos Tools
 
-An iOS app that copies your whole photo library — full-quality originals, Live Photo videos,
-RAW files and edited versions — to an S3 or S3-compatible bucket.
+An iOS app with a set of tools for looking after your photo library:
+
+- **Backup** copies your whole library — full-quality originals, Live Photo videos, RAW files and
+  edited versions — to an S3 or S3-compatible bucket.
+- **USB drive backup** copies the same files to a drive plugged into the phone.
+- **Duplicates** finds near-identical shots, picks the best of each group, and lets you delete
+  the rest.
+
+More tools will be added over time.
 
 ## Running it
 
@@ -35,7 +42,7 @@ Turning on bucket versioning (or Object Lock) protects the backup if the keys ev
                                     /FullSizeRender.jpg    (edited version)
 ```
 
-## How it works
+## How backup works
 
 - `Packages/S3Kit` — AWS SigV4 signing with no dependencies (`swift test` checks it against AWS's
   published examples).
@@ -55,7 +62,7 @@ Settings → *USB drive* → **Choose folder on drive…**, and pick a folder. T
 layout as the bucket, without the folder prefix.
 
 - iOS doesn't tell apps when a drive is plugged in and won't launch an app for one, so the app
-  checks for the drive every few seconds **while it's open**. Plug the drive in, open Photo Backup,
+  checks for the drive every few seconds **while it's open**. Plug the drive in, open Photos Tools,
   and copying starts on its own.
 - Once started, the copy keeps going after you leave the app (`BGContinuedProcessingTask`, with
   progress shown by the system) until it finishes or you stop it.
@@ -64,7 +71,24 @@ layout as the bucket, without the folder prefix.
   has the real name. Originals already on the drive are skipped; edited versions are rewritten when
   a photo changes.
 
-## Known limitations
+## Duplicates
+
+The Duplicates screen scans either recent photos (since the last full scan, or the last 30 days)
+or the whole library, and groups photos that look like the same shot.
+
+- Each photo gets a Vision feature print, an aesthetics score, a face-quality score, a sharpness
+  measure and a difference hash. Results are cached in `AnalysisStore`, so later scans only
+  analyze new or changed photos.
+- Only photos taken close together in time are compared, so a burst or a few retakes form a group
+  but similar scenes from different days don't. Exact copies (same hash and size) are grouped no
+  matter when they were taken.
+- The **Match** slider runs from near-identical to loosely similar.
+- In each group the best photo is kept: favourites first, then a blend of aesthetics, face quality
+  and sharpness. The rest are marked for deletion. Tap a photo to change that. Photos you choose to
+  keep are never suggested again.
+- Deleting goes through the system's confirmation, and deleted photos go to Recently Deleted.
+
+## Known backup limitations
 
 - Each file is sent in a single PUT, so files over 5 GB fail (no multipart upload).
 - Re-editing a photo overwrites its `FullSizeRender` in the bucket. Turn on bucket versioning to
