@@ -68,6 +68,13 @@ struct ContentView: View {
                 } footer: {
                     Text("Uploads continue in the background. Remaining photos are also backed up in the background from time to time, even when your phone isn't charging.")
                 }
+
+                Section {
+                    NavigationLink("Find duplicate photos") { CleanupView() }
+                        .disabled(!PhotoLibrary.isAuthorized)
+                } footer: {
+                    Text("Photos you delete stay in your bucket if they've already been backed up.")
+                }
             }
             .navigationTitle("Photo Backup")
             .toolbar {
