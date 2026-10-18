@@ -1,6 +1,6 @@
 import BackgroundTasks
 
-/// Schedules backup passes while the phone is charging and online (typically overnight).
+/// Schedules backup passes whenever iOS lets the app run in the background (on battery or charging).
 enum BackgroundTasks {
     static let backupTaskID = "org.barelyenough.PezraPhotos.backup"
 
@@ -17,7 +17,7 @@ enum BackgroundTasks {
             return
         }
         let request = BGProcessingTaskRequest(identifier: backupTaskID)
-        request.requiresExternalPower = true
+        request.requiresExternalPower = false
         request.requiresNetworkConnectivity = true
         do {
             try BGTaskScheduler.shared.submit(request)

@@ -43,8 +43,8 @@ Turning on bucket versioning (or Object Lock) protects the backup if the keys ev
   iCloud if necessary) to a staging folder, and hands it to a background `URLSession` with a 7-day
   presigned PUT URL, so iOS can finish the upload even after the app is suspended.
 - `BackupStore` (SQLite) records which files have uploaded. Failed files are retried on the next run.
-- Backups run when the app opens and, through `BGProcessingTask`, while the phone is charging
-  and online.
+- Backups run when the app opens and, through `BGProcessingTask`, whenever iOS grants
+  background time (charging or not).
 
 ## Known limitations
 

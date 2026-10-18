@@ -66,7 +66,7 @@ struct ContentView: View {
                             .disabled(!settings.isConfigured || !PhotoLibrary.isAuthorized)
                     }
                 } footer: {
-                    Text("Uploads continue in the background. Remaining photos are also backed up while your phone is charging on Wi-Fi.")
+                    Text("Uploads continue in the background. Remaining photos are also backed up in the background from time to time, even when your phone isn't charging.")
                 }
             }
             .navigationTitle("Photo Backup")
