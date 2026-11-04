@@ -20,6 +20,23 @@ More tools will be added over time.
 3. Run it on your phone, tap the gear, and enter the endpoint, region, bucket and keys.
    Tap **Test connection**.
 
+## Keeping it installed
+
+Apps signed with a free Apple account stop opening after 7 days. `scripts/renew-phone-app.sh` rebuilds
+the latest commit on `main` and reinstalls it, which keeps the app's data, once less than 3 days are
+left. To run it automatically every few hours while you're logged in to the Mac:
+
+```sh
+cp scripts/org.barelyenough.ios-photos-tools.renew.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.barelyenough.ios-photos-tools.renew.plist
+```
+
+The first run installs right away, so commit what you want on the phone first. The Mac needs to be
+signed in to Xcode with your Apple account and able to reach the phone by USB or Wi-Fi. It sends a
+notification if the app is within a day of expiring and it can't renew. The log is
+`~/Library/Logs/ios-photos-tools-renewal.log`. The device ID at the top of the script is specific to
+one phone.
+
 ## Credentials
 
 Use keys limited to the backup folder. The app reads as well as writes: it lists the bucket so it
