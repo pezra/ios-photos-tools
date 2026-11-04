@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import SyncKit
 
 enum ResourceState: Int {
     case pending = 0
@@ -12,6 +13,9 @@ enum ResourceState: Int {
 struct ResourceRow {
     let id: String
     let assetID: String
+    /// Where the file goes in the library, e.g. `2026/IMG_1234.HEIC`.
+    let path: String
+    /// `path` under the bucket's folder.
     let s3Key: String
 }
 
@@ -61,12 +65,51 @@ final class BackupStore: @unchecked Sendable {
                 modified_at REAL,
                 PRIMARY KEY (drive_id, asset_id)
             );
+            CREATE TABLE IF NOT EXISTS handled_paths (
+                norm TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                resource_id TEXT,
+                asset_id TEXT,
+                on_drive INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS handled_resource ON handled_paths(resource_id);
+            CREATE INDEX IF NOT EXISTS handled_asset ON handled_paths(asset_id);
+            CREATE TABLE IF NOT EXISTS remote_files (
+                source TEXT NOT NULL,
+                norm TEXT NOT NULL,
+                path TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                PRIMARY KEY (source, norm)
+            );
+            CREATE TABLE IF NOT EXISTS imported_assets (
+                asset_id TEXT PRIMARY KEY,
+                tag TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             CREATE TEMP TABLE library (id TEXT PRIMARY KEY);
             """, nil, nil, nil)
         // Columns added after the first version; these fail harmlessly when already present.
         sqlite3_exec(db, "ALTER TABLE assets ADD COLUMN modified_at REAL", nil, nil, nil)
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN sha256 TEXT", nil, nil, nil)
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN asset_modified_at REAL", nil, nil, nil)
+        migrateToLibraryLayout()
+    }
+
+    /// The layout changed from `<year>/<month>/<asset-uuid>/<file>` to the picture library's, so
+    /// everything is backed up again. The drive folder is forgotten so that doesn't go into the old
+    /// folder: the user chooses the library's folder.
+    private func migrateToLibraryLayout() {
+        let version = query("PRAGMA user_version") { Int(sqlite3_column_int($0, 0)) }.first ?? 0
+        guard version < 1 else { return }
+        execute("DELETE FROM resources")
+        execute("DELETE FROM assets")
+        execute("DELETE FROM drive_assets")
+        DriveDestination.forget()
+        sqlite3_exec(db, "PRAGMA user_version = 1", nil, nil, nil)
     }
 
     // MARK: - Queries
@@ -209,6 +252,248 @@ final class BackupStore: @unchecked Sendable {
     /// Forgets what was copied to drives other than `driveID` (all drives if nil).
     func forgetDrives(except driveID: String?) {
         locked { execute("DELETE FROM drive_assets WHERE drive_id IS NOT ?", [driveID]) }
+    }
+
+    /// After changing folders: nothing is known to be in the new one yet, so a file found at a
+    /// photo's path has to be compared rather than assumed to be that photo.
+    func forgetDriveContents() {
+        locked {
+            execute("UPDATE handled_paths SET on_drive = 0 WHERE on_drive != 0")
+            execute("DELETE FROM remote_files WHERE source = ?", [StorageSource.drive.rawValue])
+            bumpHandledVersion()
+        }
+    }
+
+    // MARK: - Library paths
+
+    /// The paths given to an asset's resources, by resource ID.
+    func paths(forAsset assetID: String) -> [String: String] {
+        locked {
+            let rows = query("SELECT resource_id, path FROM handled_paths WHERE asset_id = ? AND resource_id IS NOT NULL", [assetID]) {
+                (text($0, 0) ?? "", text($0, 1) ?? "")
+            }
+            return Dictionary(rows, uniquingKeysWith: { $1 })
+        }
+    }
+
+    /// Who holds a path: nil if nobody, otherwise the resource (nil for an imported or retired path).
+    func pathHolder(_ path: String) -> String?? {
+        let norm = LibraryPath.normalized(path)
+        return locked {
+            let rows: [String?] = query("SELECT resource_id FROM handled_paths WHERE norm = ?", [norm]) { text($0, 0) }
+            return rows.first
+        }
+    }
+
+    /// Lets go of a path whose resource is gone, such as after restoring to a phone where asset
+    /// IDs differ. The path stays handled.
+    func releasePath(_ path: String) {
+        locked { execute("UPDATE handled_paths SET resource_id = NULL, asset_id = NULL WHERE norm = ?", [LibraryPath.normalized(path)]) }
+    }
+
+    /// Gives paths to resources. Returns false, changing nothing, if another resource holds one of
+    /// them, in which case the caller looks for different paths.
+    func claim(_ rows: [ResourceRow]) -> Bool {
+        locked {
+            for row in rows {
+                let holder: [String?] = query("SELECT resource_id FROM handled_paths WHERE norm = ?", [LibraryPath.normalized(row.path)]) { text($0, 0) }
+                if let current = holder.first, let current, current != row.id { return false }
+            }
+            execute("BEGIN")
+            for row in rows {
+                execute("""
+                    INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(norm) DO UPDATE SET kind = excluded.kind, resource_id = excluded.resource_id, asset_id = excluded.asset_id
+                    """, [LibraryPath.normalized(row.path), row.path, HandledPath.Kind.backup.rawValue, row.id, row.assetID])
+            }
+            execute("COMMIT")
+            bumpHandledVersion()
+            return true
+        }
+    }
+
+    /// Takes an asset's paths away because something else turned out to be at one of them, so it
+    /// gets new ones and is backed up again. The old paths stay handled: copies may already be
+    /// there, and those must not be imported as if they were someone else's pictures.
+    func retirePaths(forAsset assetID: String) {
+        locked {
+            execute("UPDATE handled_paths SET resource_id = NULL, asset_id = NULL, on_drive = 0 WHERE asset_id = ?", [assetID])
+            // Kept as pending so the asset can't count as complete until these are backed up again,
+            // even if another of its files finishes uploading in the meantime.
+            execute("UPDATE resources SET state = ?, staged_name = NULL WHERE asset_id = ? AND state != ?",
+                    [ResourceState.pending.rawValue, assetID, ResourceState.uploading.rawValue])
+            execute("DELETE FROM assets WHERE id = ?", [assetID])
+            execute("DELETE FROM drive_assets WHERE asset_id = ?", [assetID])
+            bumpHandledVersion()
+        }
+    }
+
+    /// `retirePaths` for an upload the bucket refused because the key already exists.
+    func retirePaths(forResource resourceID: String) {
+        let assetID = locked { query("SELECT asset_id FROM resources WHERE id = ?", [resourceID]) { text($0, 0) }.first ?? nil }
+        guard let assetID else { return }
+        locked { execute("UPDATE resources SET state = ?, staged_name = NULL WHERE id = ?", [ResourceState.pending.rawValue, resourceID]) }
+        retirePaths(forAsset: assetID)
+    }
+
+    func isOnDrive(_ path: String) -> Bool {
+        locked {
+            query("SELECT on_drive FROM handled_paths WHERE norm = ?", [LibraryPath.normalized(path)]) { sqlite3_column_int($0, 0) != 0 }.first ?? false
+        }
+    }
+
+    func markOnDrive(_ path: String) {
+        locked {
+            execute("UPDATE handled_paths SET on_drive = 1 WHERE norm = ? AND on_drive = 0", [LibraryPath.normalized(path)])
+            if sqlite3_changes(db) > 0 { bumpHandledVersion() }
+        }
+    }
+
+    /// Records the upload of an edited version that turned out to be in the bucket already.
+    func markDone(_ id: String, sha256: String?) {
+        locked { execute("UPDATE resources SET sha256 = ? WHERE id = ?", [sha256, id]) }
+        markDone(id)
+    }
+
+    /// Normalized forms of every path that's been backed up or imported.
+    func handledPaths() -> Set<String> {
+        locked { Set(query("SELECT norm FROM handled_paths") { text($0, 0) ?? "" }) }
+    }
+
+    func handledEntries() -> [HandledPath] {
+        locked {
+            query("SELECT path, kind, resource_id, on_drive FROM handled_paths") { stmt in
+                HandledPath(
+                    path: text(stmt, 0) ?? "",
+                    kind: HandledPath.Kind(rawValue: text(stmt, 1) ?? "") ?? .backup,
+                    resourceID: text(stmt, 2),
+                    onDrive: sqlite3_column_int(stmt, 3) != 0 ? true : nil
+                )
+            }
+        }
+    }
+
+    /// Adds entries read from storage. Paths already known keep what's known about them.
+    func mergeHandled(_ entries: [HandledPath]) {
+        guard !entries.isEmpty else { return }
+        locked {
+            execute("BEGIN")
+            for entry in entries {
+                // Resource IDs start with the asset's identifier.
+                let assetID = entry.resourceID?.split(separator: "#").first.map(String.init)
+                execute("""
+                    INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id, on_drive) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(norm) DO UPDATE SET on_drive = MAX(on_drive, excluded.on_drive)
+                    """, [LibraryPath.normalized(entry.path), entry.path, entry.kind.rawValue, entry.resourceID, assetID, entry.onDrive == true ? 1 : 0])
+            }
+            execute("COMMIT")
+            bumpHandledVersion()
+        }
+    }
+
+    private func bumpHandledVersion() {
+        let current = query("SELECT value FROM meta WHERE key = 'handled_version'") { Int(text($0, 0) ?? "") ?? 0 }.first ?? 0
+        execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('handled_version', ?)", [String(current + 1)])
+    }
+
+    /// Goes up each time the handled paths change, to tell when copies in storage are out of date.
+    var handledVersion: Int {
+        Int(meta("handled_version") ?? "") ?? 0
+    }
+
+    func meta(_ key: String) -> String? {
+        locked { query("SELECT value FROM meta WHERE key = ?", [key]) { text($0, 0) }.first ?? nil }
+    }
+
+    func setMeta(_ key: String, _ value: String?) {
+        locked {
+            if let value {
+                execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", [key, value])
+            } else {
+                execute("DELETE FROM meta WHERE key = ?", [key])
+            }
+        }
+    }
+
+    // MARK: - What's in storage
+
+    func replaceInventory(source: StorageSource, entries: [InventoryEntry]) {
+        locked {
+            execute("BEGIN")
+            execute("DELETE FROM remote_files WHERE source = ?", [source.rawValue])
+            for entry in entries {
+                execute("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)",
+                        [source.rawValue, LibraryPath.normalized(entry.path), entry.path, Int(entry.size)])
+            }
+            execute("COMMIT")
+        }
+    }
+
+    func inventory() -> [InventoryEntry] {
+        locked {
+            query("SELECT source, path, size FROM remote_files") { stmt in
+                InventoryEntry(source: StorageSource(rawValue: text(stmt, 0) ?? "") ?? .drive, path: text(stmt, 1) ?? "", size: sqlite3_column_int64(stmt, 2))
+            }
+        }
+    }
+
+    /// Where a path is known to exist, with its exact spelling and size there.
+    func inventoryEntries(for path: String) -> [InventoryEntry] {
+        locked {
+            query("SELECT source, path, size FROM remote_files WHERE norm = ?", [LibraryPath.normalized(path)]) { stmt in
+                InventoryEntry(source: StorageSource(rawValue: text(stmt, 0) ?? "") ?? .drive, path: text(stmt, 1) ?? "", size: sqlite3_column_int64(stmt, 2))
+            }
+        }
+    }
+
+    // MARK: - Imported photos
+
+    func importedAssetIDs() -> Set<String> {
+        locked { Set(query("SELECT asset_id FROM imported_assets") { text($0, 0) ?? "" }) }
+    }
+
+    func importedTags() -> Set<String> {
+        locked { Set(query("SELECT tag FROM imported_assets") { text($0, 0) ?? "" }) }
+    }
+
+    func recordImports(_ imports: [(assetID: String, path: String)]) {
+        guard !imports.isEmpty else { return }
+        locked {
+            execute("BEGIN")
+            for item in imports {
+                execute("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", [item.assetID, LibraryPath.tag(for: item.path)])
+                execute("INSERT OR IGNORE INTO handled_paths (norm, path, kind) VALUES (?, ?, ?)",
+                        [LibraryPath.normalized(item.path), item.path, HandledPath.Kind.import.rawValue])
+            }
+            execute("COMMIT")
+            bumpHandledVersion()
+        }
+    }
+
+    /// Replaces the record of imports with what was found in the Photos library.
+    func replaceImportedAssets(_ assets: [(assetID: String, tag: String)]) {
+        locked {
+            execute("BEGIN")
+            execute("DELETE FROM imported_assets")
+            for asset in assets {
+                execute("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", [asset.assetID, asset.tag])
+            }
+            execute("COMMIT")
+        }
+    }
+
+    /// Marks paths as dealt with because a copy of them was found in the Photos library.
+    func markImported(paths: [String]) {
+        guard !paths.isEmpty else { return }
+        locked {
+            execute("BEGIN")
+            for path in paths {
+                execute("INSERT OR IGNORE INTO handled_paths (norm, path, kind) VALUES (?, ?, ?)",
+                        [LibraryPath.normalized(path), path, HandledPath.Kind.import.rawValue])
+            }
+            execute("COMMIT")
+            bumpHandledVersion()
+        }
     }
 
     // MARK: - Coverage

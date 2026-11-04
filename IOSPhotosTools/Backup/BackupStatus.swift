@@ -42,7 +42,10 @@ final class BackupStatus {
         Task.detached(priority: .utility) {
             var ids: [String] = []
             if authorized {
-                PhotoLibrary.fetchAllAssets().enumerateObjects { asset, _, _ in ids.append(asset.localIdentifier) }
+                let imported = BackupStore.shared.importedAssetIDs()
+                PhotoLibrary.fetchAllAssets().enumerateObjects { asset, _, _ in
+                    if !imported.contains(asset.localIdentifier) { ids.append(asset.localIdentifier) }
+                }
             }
             BackupStore.shared.setLibraryAssets(ids)
             await MainActor.run {
@@ -73,6 +76,26 @@ final class BackupStatus {
                 self.coverage = coverage
             }
         }
+    }
+}
+
+/// What the UI shows about syncing low-res copies to the phone.
+@MainActor
+@Observable
+final class SyncStatus {
+    static let shared = SyncStatus()
+
+    var isRunning = false
+    var phase = "Idle"
+    var remaining = 0
+    var failed = 0
+    var lastError: String?
+    var lastFinished: Date? {
+        didSet { UserDefaults.standard.set(lastFinished, forKey: "syncLastFinished") }
+    }
+
+    private init() {
+        lastFinished = UserDefaults.standard.object(forKey: "syncLastFinished") as? Date
     }
 }
 

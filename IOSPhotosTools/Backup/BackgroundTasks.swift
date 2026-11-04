@@ -38,12 +38,14 @@ enum BackgroundTasks {
         task.expirationHandler = {
             BackupEngine.stop()
             DriveBackupEngine.stop()
+            LibrarySyncEngine.stop()
         }
         Task {
             async let drive: Void = SettingsStore.driveAutoBackup && DriveDestination.isConnected
                 ? DriveBackupEngine.shared.run() : ()
             await BackupEngine.shared.run()
             await drive
+            await LibrarySyncEngine.shared.run()
             task.setTaskCompleted(success: true)
         }
     }

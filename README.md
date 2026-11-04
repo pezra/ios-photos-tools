@@ -5,6 +5,8 @@ An iOS app with a set of tools for looking after your photo library:
 - **Backup** copies your whole library — full-quality originals, Live Photo videos, RAW files and
   edited versions — to an S3 or S3-compatible bucket.
 - **USB drive backup** copies the same files to a drive plugged into the phone.
+- **Sync to phone** keeps a smaller copy of every picture on the drive and in the bucket in your
+  Photos library, so a library much larger than the phone still fits on it.
 - **Duplicates** finds near-identical shots, picks the best of each group, and lets you delete
   the rest.
 - **Trip albums** finds trips and makes an album of the best photos from each place you visited.
@@ -20,27 +22,50 @@ More tools will be added over time.
 
 ## Credentials
 
-Use keys that can only write to the backup bucket. For AWS, create an IAM user with:
+Use keys limited to the backup folder. The app reads as well as writes: it lists the bucket so it
+never overwrites a different picture with the same name, and downloads pictures to sync to the
+phone. For AWS, create an IAM user with:
 
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": "s3:PutObject",
-    "Resource": "arn:aws:s3:::YOUR-BUCKET/photos/*"
-  }]
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::YOUR-BUCKET/photos/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::YOUR-BUCKET",
+      "Condition": {"StringLike": {"s3:prefix": "photos/*"}}
+    }
+  ]
 }
 ```
 
 Turning on bucket versioning (or Object Lock) protects the backup if the keys ever leak.
 
-## Bucket layout
+## Library layout
+
+The bucket and the drive have the same layout, with the bucket's under its folder:
 
 ```
-<folder>/<year>/<month>/<asset-uuid>/IMG_1234.HEIC
-                                    /IMG_1234.MOV          (Live Photo video)
-                                    /FullSizeRender.jpg    (edited version)
+<year>/IMG_1234.HEIC
+      /IMG_1234.MOV          (Live Photo video)
+      /IMG_1234-edited.jpg   (edited version)
+      /IMG_1234 (1).HEIC     (a different photo with the same name)
+undated/...                  (no date known)
+.photos-tools/handled-paths.jsonl
+```
+
+To fill the bucket from an existing drive, run this once from a computer (it's much too much to
+send through the phone):
+
+```sh
+aws s3 sync /Volumes/YOUR-DRIVE/pictures s3://YOUR-BUCKET/photos/ \
+  --exclude '._*' --exclude '*/._*' --exclude '*.csv' --exclude '.photos-tools/*'
 ```
 
 ## How backup works
@@ -51,6 +76,10 @@ Turning on bucket versioning (or Object Lock) protects the backup if the keys ev
   iCloud if necessary) to a staging folder, and hands it to a background `URLSession` with a 7-day
   presigned PUT URL, so iOS can finish the upload even after the app is suspended.
 - `BackupStore` (SQLite) records which files have uploaded. Failed files are retried on the next run.
+- A photo's paths are chosen once (`BackupPaths`) and used for both the bucket and the drive. A file
+  already at a path is compared by SHA-256: if it's the same photo the path is adopted, otherwise the
+  photo gets the next free name. Uploads of originals also send `If-None-Match: *`, so the bucket
+  refuses to overwrite anything even if the listing was out of date.
 - Photos modified since their last backup are checked again. An edited version is re-uploaded
   when its contents have changed (compared by SHA-256).
 - Backups run when the app opens and, through `BGProcessingTask`, whenever iOS grants
@@ -59,8 +88,8 @@ Turning on bucket versioning (or Object Lock) protects the backup if the keys ev
 ## USB drive
 
 Photos can also be copied to a USB drive (or any folder in Files). Plug in the drive, open
-Settings → *USB drive* → **Choose folder on drive…**, and pick a folder. The drive gets the same
-layout as the bucket, without the folder prefix.
+Settings → *USB drive* → **Choose folder on drive…**, and pick your pictures folder. It gets the
+same layout as the bucket, without the folder prefix.
 
 - iOS doesn't tell apps when a drive is plugged in and won't launch an app for one, so the app
   checks for the drive every few seconds **while it's open**. Plug the drive in, open Photos Tools,
@@ -72,6 +101,36 @@ layout as the bucket, without the folder prefix.
   has the real name. Originals already on the drive are skipped; edited versions are rewritten when
   a photo changes.
 
+## Sync to phone
+
+Settings → *Sync to phone* → **Set up sync…** shows how many pictures would be added and how much
+room they'd take, and starts when you confirm. After that it runs by itself after each backup.
+
+- Pictures become 2048-pixel HEICs, about 290 KB each. Ones that are already small, and GIFs, are kept
+  as they are. Videos stay in storage.
+- Copies go in your Photos library, with their original date and location, and in a **Drive Library**
+  album. Pictures with no date get January 1 of their folder's year. Those in `undated/` get
+  January 1, 2000, and also go in an **Undated** album.
+- The drive is read when it's connected, since it's faster and free. Otherwise pictures are downloaded
+  from the bucket, on Wi-Fi unless *Use cellular data* is on, which your provider may charge for.
+- If iCloud Photos is on, the copies upload to iCloud too and count against your storage.
+- It stops when the phone has less than 10 GB free, and picks up where it left off after any
+  interruption.
+- It only adds. A picture removed or changed in storage is left alone on the phone.
+
+Copies are kept apart from your real photos: they're never backed up, and Duplicates and Trip albums
+ignore them. Photos taken on the phone stay at full resolution.
+
+**What's been dealt with.** A path that's been backed up or imported is never imported again, so
+photos you delete stay gone, here and in storage. That's recorded in two places outside the app, so
+reinstalling doesn't produce duplicates or bring deleted photos back:
+
+- The file name of each copy has a tag, a hash of its path: `IMG_1234.ptk-9f3a2c1b7d04.HEIC`. This
+  identifies copies with no database, drive or network. You can see it in the photo's info.
+- `.photos-tools/handled-paths.jsonl` on the drive and in the bucket lists every path dealt with,
+  including deleted photos. Don't delete it from both.
+
+Sync needs full photo access, because with limited access it can't see all of its copies.
 
 ## Duplicates
 

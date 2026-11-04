@@ -12,6 +12,7 @@ private enum Key {
     static let autoBackup = "autoBackup"
     static let driveAutoBackup = "driveAutoBackup"
     static let tripAlbums = "tripAlbums"
+    static let syncEnabled = "syncEnabled"
     static let accessKeyID = "accessKeyID"
     static let secretAccessKey = "secretAccessKey"
 }
@@ -30,6 +31,8 @@ final class SettingsStore {
     var autoBackup: Bool { didSet { Self.defaults.set(autoBackup, forKey: Key.autoBackup) } }
     var driveAutoBackup: Bool { didSet { Self.defaults.set(driveAutoBackup, forKey: Key.driveAutoBackup) } }
     var tripAlbums: Bool { didSet { Self.defaults.set(tripAlbums, forKey: Key.tripAlbums) } }
+    /// Off until the user has seen how much would be imported and chosen to start.
+    var syncEnabled: Bool { didSet { Self.defaults.set(syncEnabled, forKey: Key.syncEnabled) } }
     /// The backup drive folder's display name, or nil if none is set up.
     private(set) var driveName: String?
     var accessKeyID: String { didSet { Keychain.set(accessKeyID, for: Key.accessKeyID) } }
@@ -47,6 +50,9 @@ final class SettingsStore {
         autoBackup = d.bool(forKey: Key.autoBackup)
         driveAutoBackup = d.bool(forKey: Key.driveAutoBackup)
         tripAlbums = d.bool(forKey: Key.tripAlbums)
+        syncEnabled = d.bool(forKey: Key.syncEnabled)
+        // Opening the database first, since moving to a new layout can forget the drive folder.
+        _ = BackupStore.shared
         driveName = DriveDestination.name
         accessKeyID = Keychain.get(Key.accessKeyID) ?? ""
         secretAccessKey = Keychain.get(Key.secretAccessKey) ?? ""
@@ -60,8 +66,10 @@ final class SettingsStore {
 
     func setDrive(folder: URL) throws {
         DriveBackupEngine.stop()
+        let previousID = DriveDestination.id
         try DriveDestination.configure(folder: folder)
         BackupStore.shared.forgetDrives(except: DriveDestination.id)
+        if DriveDestination.id != previousID { BackupStore.shared.forgetDriveContents() }
         driveName = DriveDestination.name
     }
 
@@ -69,6 +77,7 @@ final class SettingsStore {
         DriveBackupEngine.stop()
         DriveDestination.forget()
         BackupStore.shared.forgetDrives(except: nil)
+        BackupStore.shared.forgetDriveContents()
         driveName = nil
     }
 
@@ -82,6 +91,10 @@ final class SettingsStore {
     static var tripAlbums: Bool {
         registerDefaults()
         return defaults.bool(forKey: Key.tripAlbums)
+    }
+
+    static var syncEnabled: Bool {
+        defaults.bool(forKey: Key.syncEnabled)
     }
 
     struct Snapshot: Sendable {

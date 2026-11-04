@@ -67,11 +67,30 @@ actor BackupEngine {
         store.setLibraryAssets(libraryIDs)
         await MainActor.run { BackupStatus.shared.refreshCounts() }
 
+        // Names are checked against what's in the bucket so nothing is overwritten, so without a
+        // listing nothing can safely be uploaded.
+        if !pending.isEmpty {
+            do {
+                try await StorageInventory.mergeHandledPaths(fromS3: client, prefix: settings.prefix)
+                try await StorageInventory.refreshS3(client: client, prefix: settings.prefix)
+            } catch {
+                await report(phase: "Couldn't list the bucket", running: false,
+                             error: "Backup needs s3:ListBucket and s3:GetObject as well as s3:PutObject. \(error.localizedDescription)")
+                return
+            }
+        }
+
+        var namingFailures = 0
+        var namingError: String?
         for (index, asset) in pending.enumerated() {
             await waitForUploadSlot()
             if Task.isCancelled { break }
             await report(phase: "Preparing \(index + 1) of \(pending.count)", running: true)
-            await stage(asset, client: client, settings: settings)
+            if let error = await stage(asset, client: client, settings: settings) {
+                namingFailures += 1
+                namingError = error.localizedDescription
+            }
+            await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: false)
         }
 
         if !Task.isCancelled {
@@ -80,31 +99,45 @@ actor BackupEngine {
                 try? await Task.sleep(for: .seconds(2))
             }
         }
+        await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: true)
 
-        let failed = store.count(.failed)
+        let failed = store.count(.failed) + namingFailures
         let phase = Task.isCancelled ? "Paused" : failed > 0 ? "Finished with \(failed) failed files" : "Up to date"
-        await report(phase: phase, running: false, error: failed > 0 ? store.lastError() : nil, finished: !Task.isCancelled)
+        await report(phase: phase, running: false, error: failed > 0 ? store.lastError() ?? namingError : nil, finished: !Task.isCancelled)
+        if !Task.isCancelled { LibrarySyncEngine.start() }
     }
 
-    private func stage(_ asset: PHAsset, client: S3Client, settings: SettingsStore.Snapshot) async {
+    /// Returns an error if the asset's files couldn't be given paths, so it's tried again next pass.
+    private func stage(_ asset: PHAsset, client: S3Client, settings: SettingsStore.Snapshot) async -> Error? {
         let assetID = asset.localIdentifier
         let modifiedAt = asset.modificationDate?.timeIntervalSince1970
-        let resources = PhotoLibrary.backupResources(for: asset, prefix: settings.prefix)
+        let resources: [(PHAssetResource, ResourceRow)]
+        do {
+            resources = try await BackupPaths.assign(asset, prefix: settings.prefix)
+        } catch {
+            return error
+        }
         guard !resources.isEmpty else {
             store.markAssetComplete(assetID, modifiedAt: modifiedAt)
-            return
+            return nil
         }
         store.register(resources.map(\.1), assetID: assetID, assetModifiedAt: modifiedAt)
         let existing = store.resources(forAsset: assetID)
 
         for (resource, row) in resources {
-            if Task.isCancelled { return }
+            if Task.isCancelled { return nil }
             let previous = existing[row.id]
             if previous?.state == .uploading { continue }
             // Originals never change, but an edited render keeps its name when re-edited, so it
             // is re-exported and compared by content.
             let isEdit = PhotoLibrary.editedTypes.contains(resource.type)
             if previous?.state == .done && !isEdit { continue }
+            // Already at its own path in the bucket, as when reinstalling loses the upload history.
+            let inBucket = store.inventoryEntries(for: row.path).first { $0.source == .s3 }
+            if previous?.state != .done && !isEdit && inBucket != nil {
+                store.markDone(row.id)
+                continue
+            }
 
             let stagedName = UUID().uuidString
             let file = Staging.url(for: stagedName)
@@ -121,6 +154,12 @@ actor BackupEngine {
                 Staging.remove(stagedName)
                 continue
             }
+            if previous?.state != .done, let inBucket,
+               (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) == inBucket.size {
+                Staging.remove(stagedName)
+                store.markDone(row.id, sha256: sha256)
+                continue
+            }
             let url = client.presignedURL(method: "PUT", key: row.s3Key, expiresIn: urlLifetime)
             store.markUploading(row.id, stagedName: stagedName, sha256: sha256)
             UploadSession.shared.upload(
@@ -128,12 +167,14 @@ actor BackupEngine {
                 to: url,
                 contentType: PhotoLibrary.contentType(of: resource),
                 resourceID: row.id,
-                allowCellular: settings.allowCellular
+                allowCellular: settings.allowCellular,
+                mustNotExist: !isEdit
             )
         }
         // Records the new modification date when nothing needed uploading.
         store.markAssetCompleteIfFinished(assetID)
         await MainActor.run { BackupStatus.shared.refreshCounts() }
+        return nil
     }
 
     private func waitForUploadSlot() async {

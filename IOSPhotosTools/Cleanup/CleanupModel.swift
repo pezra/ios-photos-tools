@@ -177,13 +177,17 @@ final class CleanupModel {
         marked = Set(groups.flatMap { $0.assetIDs.dropFirst() }).subtracting(kept)
     }
 
-    /// Visible still photos, including every shot of each burst. Hidden photos are left alone.
+    /// Visible still photos, including every shot of each burst. Hidden photos are left alone, and
+    /// so are low-res copies synced from storage, which has already been cleaned up.
     private static func fetchPhotos() -> [PHAsset] {
         let options = PHFetchOptions()
         options.includeAllBurstAssets = true
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        let imported = BackupStore.shared.importedAssetIDs()
         var assets: [PHAsset] = []
-        PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in assets.append(asset) }
+        PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
+            if !imported.contains(asset.localIdentifier) { assets.append(asset) }
+        }
         return assets
     }
 }

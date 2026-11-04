@@ -5,6 +5,7 @@ struct ContentView: View {
     @Environment(BackupStatus.self) private var status
     @Environment(SettingsStore.self) private var settings
     @Environment(DriveStatus.self) private var drive
+    @Environment(SyncStatus.self) private var sync
     @State private var showingSettings = false
 
     var body: some View {
@@ -47,6 +48,16 @@ struct ContentView: View {
                     Text("Backup")
                 } footer: {
                     Text(footer)
+                }
+
+                if settings.syncEnabled {
+                    Section {
+                        syncRow
+                    } header: {
+                        Text("Sync to phone")
+                    } footer: {
+                        Text("Smaller copies of the pictures in storage, in the \(LibrarySyncEngine.albumTitle) album. They aren't backed up, and ones you delete don't come back.")
+                    }
                 }
 
                 Section {
@@ -107,6 +118,28 @@ struct ContentView: View {
             canStart: drive.isConnected && PhotoLibrary.isAuthorized,
             start: { DriveBackupEngine.start() },
             stop: { DriveBackupEngine.stop() }
+        )
+    }
+
+    private var syncRow: some View {
+        DestinationRow(
+            title: "This phone",
+            systemImage: "iphone",
+            phase: sync.phase,
+            details: [
+                sync.isRunning && sync.remaining > 0 ? "\(sync.remaining) to go" : nil,
+                sync.failed > 0 ? "\(sync.failed) failed (will retry)" : nil,
+            ],
+            lastFinished: sync.lastFinished,
+            error: sync.lastError,
+            isRunning: sync.isRunning,
+            canStart: PhotoLibrary.hasFullAccess,
+            startTitle: "Sync now",
+            start: {
+                // Through the drive pass, which keeps going when the app is closed.
+                if drive.isConnected { DriveBackupEngine.start() } else { LibrarySyncEngine.start() }
+            },
+            stop: { LibrarySyncEngine.stop() }
         )
     }
 
@@ -215,6 +248,7 @@ private struct DestinationRow: View {
     let error: String?
     let isRunning: Bool
     let canStart: Bool
+    var startTitle = "Back up now"
     let start: () -> Void
     let stop: () -> Void
 
@@ -226,7 +260,7 @@ private struct DestinationRow: View {
                 if isRunning {
                     Button("Pause", role: .destructive, action: stop)
                 } else {
-                    Button("Back up now", action: start).disabled(!canStart)
+                    Button(startTitle, action: start).disabled(!canStart)
                 }
             }
             .buttonStyle(.borderless)

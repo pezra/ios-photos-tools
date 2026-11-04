@@ -414,13 +414,16 @@ final class TripsModel {
         return dates
     }
 
-    /// Every visible photo's date and place, skipping screenshots. Bursts count once.
+    /// Every visible photo's date and place, skipping screenshots and low-res copies synced from
+    /// storage. Bursts count once.
     nonisolated private static func fetchLibrary() -> (photos: [TripPhoto], modified: [String: Double]) {
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        let imported = BackupStore.shared.importedAssetIDs()
         var photos: [TripPhoto] = []
         var modified: [String: Double] = [:]
         PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
+            guard !imported.contains(asset.localIdentifier) else { return }
             guard let date = asset.creationDate, !asset.mediaSubtypes.contains(.photoScreenshot) else { return }
             let coordinate = asset.location.map {
                 Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)

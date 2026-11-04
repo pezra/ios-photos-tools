@@ -10,6 +10,10 @@ struct SettingsView: View {
     @State private var confirmingReset = false
     @State private var choosingDriveFolder = false
     @State private var driveError: String?
+    @State private var isCheckingSync = false
+    @State private var confirmingSync = false
+    @State private var pendingSync: Int?
+    @State private var syncError: String?
 
     var body: some View {
         @Bindable var settings = settings
@@ -90,7 +94,30 @@ struct SettingsView: View {
                 } header: {
                     Text("USB drive")
                 } footer: {
-                    Text("Plug in the drive, then pick a folder on it. Photos are copied there whenever the drive is plugged in while Photos Tools is open, and keep copying if you leave the app.")
+                    Text("Plug in the drive, then pick your pictures folder on it. Photos are copied into its year folders whenever the drive is plugged in while Photos Tools is open, and keep copying if you leave the app.")
+                }
+
+                Section {
+                    if settings.syncEnabled {
+                        Toggle("Sync pictures to this phone", isOn: $settings.syncEnabled)
+                    } else {
+                        Button {
+                            Task { await checkSync() }
+                        } label: {
+                            HStack {
+                                Text("Set up sync…")
+                                if isCheckingSync { Spacer(); ProgressView() }
+                            }
+                        }
+                        .disabled(isCheckingSync)
+                    }
+                    if let syncError {
+                        Label(syncError, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("Sync to phone")
+                } footer: {
+                    Text("Keeps a smaller copy of every picture on the drive and in the bucket in your Photos library, in the \(LibrarySyncEngine.albumTitle) album. Originals stay in storage. Needs full photo access.")
                 }
 
                 Section {
@@ -104,7 +131,7 @@ struct SettingsView: View {
                 Section {
                     Button("Forget backup history", role: .destructive) { confirmingReset = true }
                 } footer: {
-                    Text("Makes the next backup upload everything again. Use this after switching to a different bucket.")
+                    Text("Makes the next backup check every photo again and upload whatever isn't in the bucket. Use this after switching to a different bucket.")
                 }
             }
             .navigationTitle("Settings")
@@ -120,7 +147,12 @@ struct SettingsView: View {
                     driveError = error.localizedDescription
                 }
             }
-            .confirmationDialog("Upload your whole library again?", isPresented: $confirmingReset, titleVisibility: .visible) {
+            .confirmationDialog("Sync \(pendingSync ?? 0) pictures to this phone?", isPresented: $confirmingSync, titleVisibility: .visible) {
+                Button("Start sync") { startSync() }
+            } message: {
+                Text(syncConfirmation)
+            }
+            .confirmationDialog("Check your whole library again?", isPresented: $confirmingReset, titleVisibility: .visible) {
                 Button("Forget backup history", role: .destructive) {
                     BackupStore.shared.reset()
                     BackupStatus.shared.refreshCounts()
@@ -137,12 +169,60 @@ struct SettingsView: View {
             let client = try S3Client(config: snapshot.s3)
             let key = [snapshot.prefix, ".backup-test"].filter { !$0.isEmpty }.joined(separator: "/")
             try await client.putObject(key: key, data: Data("Photos Tools connection test\n".utf8), contentType: "text/plain")
-            testResult = .success("Wrote \(key)")
+            _ = try await client.listObjects(prefix: key)
+            _ = try await client.getObject(key: key)
+            testResult = .success("Wrote, listed and read \(key)")
+        } catch let error as S3Error where error.status == 403 {
+            testResult = .failure(ConnectionError.needsReadAccess(error))
         } catch {
             testResult = .failure(error)
         }
     }
 
+    private enum ConnectionError: Error, LocalizedError {
+        case needsReadAccess(S3Error)
+
+        var errorDescription: String? {
+            if case let .needsReadAccess(error) = self {
+                return "These keys need s3:PutObject, s3:GetObject and s3:ListBucket. \(error.localizedDescription)"
+            }
+            return nil
+        }
+    }
+
+    private func checkSync() async {
+        isCheckingSync = true
+        syncError = nil
+        defer { isCheckingSync = false }
+        guard PhotoLibrary.hasFullAccess else {
+            syncError = "Allow full photo access in the Settings app first."
+            return
+        }
+        do {
+            pendingSync = try await LibrarySyncEngine.shared.countPending()
+            confirmingSync = true
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    private var syncConfirmation: String {
+        let size = Int64(pendingSync ?? 0) * LibrarySyncEngine.estimatedBytesPerPicture
+        let estimate = size.formatted(.byteCount(style: .file))
+        let drive = DriveDestination.isConnected
+            ? ""
+            : " The drive isn't connected, so pictures would be downloaded from the bucket, which your provider may charge for. Plug it in first to avoid that."
+        return "This adds about \(estimate) to your Photos library. If iCloud Photos is on, the copies also upload to iCloud and count against your storage.\(drive)"
+    }
+
+    private func startSync() {
+        settings.syncEnabled = true
+        if DriveDestination.isConnected {
+            DriveBackupEngine.start()
+        } else {
+            LibrarySyncEngine.start()
+        }
+    }
 }
 
 private extension View {
