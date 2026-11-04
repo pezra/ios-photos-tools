@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A1B2C3D40000000000000001 /* S3Kit in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D40000000000000020 /* S3Kit */; };
+		A1B2C3D40000000000000022 /* TripKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D40000000000000023 /* TripKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +30,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1B2C3D40000000000000001 /* S3Kit in Frameworks */,
+				A1B2C3D40000000000000022 /* TripKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -73,6 +75,7 @@
 			name = IOSPhotosTools;
 			packageProductDependencies = (
 				A1B2C3D40000000000000020 /* S3Kit */,
+				A1B2C3D40000000000000023 /* TripKit */,
 			);
 			productName = IOSPhotosTools;
 			productReference = A1B2C3D40000000000000002 /* IOSPhotosTools.app */;
@@ -104,6 +107,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A1B2C3D40000000000000021 /* XCLocalSwiftPackageReference "Packages/S3Kit" */,
+				A1B2C3D40000000000000024 /* XCLocalSwiftPackageReference "Packages/TripKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1B2C3D40000000000000006 /* Products */;
@@ -289,6 +293,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/S3Kit;
 		};
+		A1B2C3D40000000000000024 /* XCLocalSwiftPackageReference "Packages/TripKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/TripKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -296,6 +304,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B2C3D40000000000000021 /* XCLocalSwiftPackageReference "Packages/S3Kit" */;
 			productName = S3Kit;
+		};
+		A1B2C3D40000000000000023 /* TripKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B2C3D40000000000000024 /* XCLocalSwiftPackageReference "Packages/TripKit" */;
+			productName = TripKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

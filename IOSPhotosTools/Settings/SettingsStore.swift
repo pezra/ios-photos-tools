@@ -11,6 +11,7 @@ private enum Key {
     static let allowCellular = "allowCellular"
     static let autoBackup = "autoBackup"
     static let driveAutoBackup = "driveAutoBackup"
+    static let tripAlbums = "tripAlbums"
     static let accessKeyID = "accessKeyID"
     static let secretAccessKey = "secretAccessKey"
 }
@@ -28,6 +29,7 @@ final class SettingsStore {
     var allowCellular: Bool { didSet { Self.defaults.set(allowCellular, forKey: Key.allowCellular) } }
     var autoBackup: Bool { didSet { Self.defaults.set(autoBackup, forKey: Key.autoBackup) } }
     var driveAutoBackup: Bool { didSet { Self.defaults.set(driveAutoBackup, forKey: Key.driveAutoBackup) } }
+    var tripAlbums: Bool { didSet { Self.defaults.set(tripAlbums, forKey: Key.tripAlbums) } }
     /// The backup drive folder's display name, or nil if none is set up.
     private(set) var driveName: String?
     var accessKeyID: String { didSet { Keychain.set(accessKeyID, for: Key.accessKeyID) } }
@@ -44,6 +46,7 @@ final class SettingsStore {
         allowCellular = d.bool(forKey: Key.allowCellular)
         autoBackup = d.bool(forKey: Key.autoBackup)
         driveAutoBackup = d.bool(forKey: Key.driveAutoBackup)
+        tripAlbums = d.bool(forKey: Key.tripAlbums)
         driveName = DriveDestination.name
         accessKeyID = Keychain.get(Key.accessKeyID) ?? ""
         secretAccessKey = Keychain.get(Key.secretAccessKey) ?? ""
@@ -69,11 +72,16 @@ final class SettingsStore {
         driveName = nil
     }
 
-    // MARK: - Thread-safe access for the backup engine
+    // MARK: - Thread-safe access for the backup engine and trip albums
 
     static var driveAutoBackup: Bool {
         registerDefaults()
         return defaults.bool(forKey: Key.driveAutoBackup)
+    }
+
+    static var tripAlbums: Bool {
+        registerDefaults()
+        return defaults.bool(forKey: Key.tripAlbums)
     }
 
     struct Snapshot: Sendable {
@@ -121,6 +129,7 @@ final class SettingsStore {
             Key.allowCellular: false,
             Key.autoBackup: true,
             Key.driveAutoBackup: true,
+            Key.tripAlbums: true,
         ])
     }
 }

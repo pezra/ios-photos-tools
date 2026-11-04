@@ -7,6 +7,7 @@ An iOS app with a set of tools for looking after your photo library:
 - **USB drive backup** copies the same files to a drive plugged into the phone.
 - **Duplicates** finds near-identical shots, picks the best of each group, and lets you delete
   the rest.
+- **Trip albums** finds trips and makes an album of the best photos from each place you visited.
 
 More tools will be added over time.
 
@@ -71,6 +72,7 @@ layout as the bucket, without the folder prefix.
   has the real name. Originals already on the drive are skipped; edited versions are rewritten when
   a photo changes.
 
+
 ## Duplicates
 
 The Duplicates screen scans either recent photos (since the last full scan, or the last 30 days)
@@ -87,6 +89,30 @@ or the whole library, and groups photos that look like the same shot.
   and sharpness. The rest are marked for deletion. Tap a photo to change that. Photos you choose to
   keep are never suggested again.
 - Deleting goes through the system's confirmation, and deleted photos go to Recently Deleted.
+
+## Trip albums
+
+Trips are found automatically and each one gets an album in a **Trips** folder in Photos, with no
+setup. This happens when the app opens and whenever iOS gives it background time.
+
+- **Usual places.** Photos are grouped into cells about 10 km across. A cell with photos on at least
+  8 days spread over at least 3 months is somewhere you live or work rather than visit.
+- **Trips.** A trip is a run of photos taken away from your usual places. It ends when a photo is
+  taken at a usual place again or when no photos are taken for 2 days, and needs at least 12
+  geotagged photos. A trip that may still be going on doesn't get an album yet.
+- **Places within a trip.** Moving more than about 750 m or a 90-minute gap starts a new place. Going
+  back to a place joins the earlier visit. Photos without a location join a place if they were taken
+  within 10 minutes of a geotagged photo there.
+- **Picks.** Retakes are collapsed with the duplicate finder, and screenshots, receipts and poor shots
+  are skipped. Each place gets 1–3 photos depending on how many different shots were taken there.
+  The app aims for one of people (a face or a person large in the frame) and one of the place itself,
+  then adds more only if they look clearly different. Favourites come first.
+- **Changing an album.** Open *Trip albums*, pick a trip, and remove photos or tap *Choose photos*
+  for a place. Changes go straight to the album. Changes made in Photos count too: adding or removing
+  photos, or renaming the album. Your changes are kept when the trip is checked again. If you delete
+  an album it isn't made again unless you tap *Create album*.
+- Turn it off under Settings → *Trip albums*.
+- The trip logic is in `Packages/TripKit` (`swift test` runs its tests).
 
 ## Known backup limitations
 

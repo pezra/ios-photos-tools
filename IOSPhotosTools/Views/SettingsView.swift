@@ -94,6 +94,14 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Make trip albums automatically", isOn: $settings.tripAlbums)
+                } header: {
+                    Text("Trip albums")
+                } footer: {
+                    Text("When you get back from a trip, an album of the best photos from each place you visited is added to the Trips folder in Photos.")
+                }
+
+                Section {
                     Button("Forget backup history", role: .destructive) { confirmingReset = true }
                 } footer: {
                     Text("Makes the next backup upload everything again. Use this after switching to a different bucket.")
@@ -134,6 +142,7 @@ struct SettingsView: View {
             testResult = .failure(error)
         }
     }
+
 }
 
 private extension View {

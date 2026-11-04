@@ -20,6 +20,7 @@ struct IOSPhotosToolsApp: App {
             case .active:
                 status.refresh()
                 if settings.autoBackup { BackupEngine.start() }
+                if settings.tripAlbums { TripsModel.shared.start() }
                 DriveMonitor.shared.start()
             case .background:
                 DriveMonitor.shared.stop()

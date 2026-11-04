@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>org.barelyenough.ios-photos-tools.backup</string>
+		<string>org.barelyenough.ios-photos-tools.trips</string>
 		<string>org.barelyenough.ios-photos-tools.drive.*</string>
 	</array>
 	<key>UIBackgroundModes</key>

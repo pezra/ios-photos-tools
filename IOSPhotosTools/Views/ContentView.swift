@@ -52,6 +52,8 @@ struct ContentView: View {
                 Section {
                     NavigationLink("Find duplicate photos") { CleanupView() }
                         .disabled(!PhotoLibrary.isAuthorized)
+                    NavigationLink("Trip albums") { TripsView() }
+                        .disabled(!PhotoLibrary.isAuthorized)
                 } footer: {
                     Text("Photos you delete stay in your bucket if they've already been backed up.")
                 }
@@ -124,6 +126,7 @@ struct ContentView: View {
             _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
             status.refresh()
             if settings.autoBackup { BackupEngine.start() }
+            if settings.tripAlbums { TripsModel.shared.start() }
         } else {
             status.refresh()
         }
