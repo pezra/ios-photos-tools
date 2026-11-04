@@ -64,6 +64,9 @@ phone. For AWS, create an IAM user with:
 
 Turning on bucket versioning (or Object Lock) protects the backup if the keys ever leak.
 
+On Backblaze B2, use an application key limited to the bucket with `listFiles`, `readFiles` and
+`writeFiles`. Add `--endpoint-url https://s3.YOUR-REGION.backblazeb2.com` to the `aws` command below.
+
 ## Library layout
 
 The bucket and the drive have the same layout, with the bucket's under its folder:
@@ -96,7 +99,9 @@ aws s3 sync /Volumes/YOUR-DRIVE/pictures s3://YOUR-BUCKET/photos/ \
 - A photo's paths are chosen once (`BackupPaths`) and used for both the bucket and the drive. A file
   already at a path is compared by SHA-256: if it's the same photo the path is adopted, otherwise the
   photo gets the next free name. Uploads of originals also send `If-None-Match: *`, so the bucket
-  refuses to overwrite anything even if the listing was out of date.
+  refuses to overwrite anything even if the listing was out of date. Services that don't support that
+  header, such as Backblaze B2, answer 501; the app remembers and relies on the listing alone, so keep
+  file versions turned on for those buckets.
 - Photos modified since their last backup are checked again. An edited version is re-uploaded
   when its contents have changed (compared by SHA-256).
 - Backups run when the app opens and, through `BGProcessingTask`, whenever iOS grants

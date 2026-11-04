@@ -43,7 +43,8 @@ actor BackupEngine {
         return pass
     }
 
-    private func performPass() async {
+    /// `isRetry` is for the one extra pass given to uploads that have to be sent again.
+    private func performPass(isRetry: Bool = false) async {
         guard let settings = SettingsStore.snapshot() else {
             await report(phase: "Storage not configured", running: false)
             return
@@ -97,6 +98,10 @@ actor BackupEngine {
             await report(phase: "Uploading…", running: true)
             while !Task.isCancelled && store.count(.uploading) > 0 {
                 try? await Task.sleep(for: .seconds(2))
+            }
+            // Uploads the bucket turned away because of how they were sent, or because of the name.
+            if !isRetry && store.count(.pending) > 0 {
+                return await performPass(isRetry: true)
             }
         }
         await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: true)
