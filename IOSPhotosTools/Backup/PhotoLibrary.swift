@@ -29,6 +29,14 @@ enum PhotoLibrary {
         return PHAsset.fetchAssets(with: options)
     }
 
+    /// Calls `body` with each of `assets` except the low-res copies imported from storage.
+    static func enumerateOwnAssets(_ assets: PHFetchResult<PHAsset>, _ body: @escaping (PHAsset) -> Void) {
+        let imported = BackupStore.shared.importedAssetIDs()
+        assets.enumerateObjects { asset, _, _ in
+            if !imported.contains(asset.localIdentifier) { body(asset) }
+        }
+    }
+
     /// Full access, which syncing to the phone needs: with limited access imported photos can't
     /// all be seen, so they'd be imported again.
     static var hasFullAccess: Bool {
@@ -42,11 +50,9 @@ enum PhotoLibrary {
     /// New assets are included, plus completed ones modified since (e.g. edited) so new edits are
     /// backed up, and ones whose date is unknown.
     static func pendingAssets(completed: [String: Double?]) -> (pending: [PHAsset], allIDs: [String]) {
-        let imported = BackupStore.shared.importedAssetIDs()
         var pending: [PHAsset] = []
         var ids: [String] = []
-        fetchAllAssets().enumerateObjects { asset, _, _ in
-            guard !imported.contains(asset.localIdentifier) else { return }
+        enumerateOwnAssets(fetchAllAssets()) { asset in
             ids.append(asset.localIdentifier)
             guard let backedUpAt = completed[asset.localIdentifier] else { return pending.append(asset) }
             if let backedUpAt, let modified = asset.modificationDate?.timeIntervalSince1970, modified <= backedUpAt { return }
@@ -55,12 +61,17 @@ enum PhotoLibrary {
         return (pending, ids)
     }
 
+    /// The tag on a photo imported from storage, if these are the files of one.
+    static func importTag(in resources: [PHAssetResource]) -> String? {
+        resources.lazy.compactMap { LibraryPath.tag(inFilename: $0.originalFilename) }.first
+    }
+
     /// The files of `asset` to back up. A photo imported from storage has none: this goes by the
     /// tag on the photo itself, so a low-res copy can't overwrite or join the backup even if the
     /// database has lost track of it.
     static func backupCandidates(for asset: PHAsset) -> [PHAssetResource] {
         let resources = PHAssetResource.assetResources(for: asset)
-        guard !resources.contains(where: { LibraryPath.tag(inFilename: $0.originalFilename) != nil }) else { return [] }
+        guard importTag(in: resources) == nil else { return [] }
         return resources.filter { backedUpTypes.contains($0.type) }
     }
 

@@ -14,7 +14,13 @@ enum StorageInventory {
 
     // MARK: - Drive
 
-    static func refreshDrive(root: URL) throws {
+    /// Brings the record of handled paths and the listing of the drive up to date.
+    static func prepareDrive(root: URL, driveID: String) throws {
+        try mergeHandledPaths(fromDrive: root, driveID: driveID)
+        try refreshDrive(root: root)
+    }
+
+    private static func refreshDrive(root: URL) throws {
         let entries = walk(root: root)
         // A walk cut short by the drive being unplugged would look like missing files.
         guard (try? root.checkResourceIsReachable()) == true else { throw CocoaError(.fileNoSuchFile) }
@@ -34,7 +40,7 @@ enum StorageInventory {
         return entries
     }
 
-    static func mergeHandledPaths(fromDrive root: URL, driveID: String) throws {
+    private static func mergeHandledPaths(fromDrive root: URL, driveID: String) throws {
         let key = "merged-drive-\(driveID)"
         guard store.meta(key) == nil else { return }
         let file = root.appending(path: HandledPathsFile.relativePath)
@@ -66,7 +72,13 @@ enum StorageInventory {
 
     // MARK: - Bucket
 
-    static func refreshS3(client: S3Client, prefix: String, session: URLSession = .shared) async throws {
+    /// Brings the record of handled paths and the listing of the bucket up to date.
+    static func prepareS3(client: S3Client, prefix: String, session: URLSession = .shared) async throws {
+        try await mergeHandledPaths(fromS3: client, prefix: prefix, session: session)
+        try await refreshS3(client: client, prefix: prefix, session: session)
+    }
+
+    private static func refreshS3(client: S3Client, prefix: String, session: URLSession) async throws {
         let root = prefix.isEmpty ? "" : "\(prefix)/"
         let objects = try await client.listObjects(prefix: root, session: session)
         let entries = objects.compactMap { object -> InventoryEntry? in
@@ -82,7 +94,7 @@ enum StorageInventory {
         store.meta(listedKey(client: client, prefix: prefix)) != nil
     }
 
-    static func mergeHandledPaths(fromS3 client: S3Client, prefix: String, session: URLSession = .shared) async throws {
+    private static func mergeHandledPaths(fromS3 client: S3Client, prefix: String, session: URLSession) async throws {
         let key = "merged-s3-\(identity(client: client, prefix: prefix))"
         guard store.meta(key) == nil else { return }
         do {
@@ -118,7 +130,7 @@ enum StorageInventory {
     }
 
     private static func handledKey(prefix: String) -> String {
-        [prefix, HandledPathsFile.relativePath].filter { !$0.isEmpty }.joined(separator: "/")
+        LibraryPath.key(prefix: prefix, path: HandledPathsFile.relativePath)
     }
 
     private static func identity(client: S3Client, prefix: String) -> String {

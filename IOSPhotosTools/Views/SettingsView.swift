@@ -1,5 +1,6 @@
 import S3Kit
 import SwiftUI
+import SyncKit
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
@@ -12,7 +13,7 @@ struct SettingsView: View {
     @State private var driveError: String?
     @State private var isCheckingSync = false
     @State private var confirmingSync = false
-    @State private var pendingSync: Int?
+    @State private var pendingSync = 0
     @State private var syncError: String?
 
     var body: some View {
@@ -147,7 +148,7 @@ struct SettingsView: View {
                     driveError = error.localizedDescription
                 }
             }
-            .confirmationDialog("Sync \(pendingSync ?? 0) pictures to this phone?", isPresented: $confirmingSync, titleVisibility: .visible) {
+            .confirmationDialog("Sync \(pendingSync) pictures to this phone?", isPresented: $confirmingSync, titleVisibility: .visible) {
                 Button("Start sync") { startSync() }
             } message: {
                 Text(syncConfirmation)
@@ -167,7 +168,7 @@ struct SettingsView: View {
         guard let snapshot = SettingsStore.snapshot() else { return }
         do {
             let client = try S3Client(config: snapshot.s3)
-            let key = [snapshot.prefix, ".backup-test"].filter { !$0.isEmpty }.joined(separator: "/")
+            let key = LibraryPath.key(prefix: snapshot.prefix, path: ".backup-test")
             try await client.putObject(key: key, data: Data("Photos Tools connection test\n".utf8), contentType: "text/plain")
             _ = try await client.listObjects(prefix: key)
             _ = try await client.getObject(key: key)
@@ -183,10 +184,9 @@ struct SettingsView: View {
         case needsReadAccess(S3Error)
 
         var errorDescription: String? {
-            if case let .needsReadAccess(error) = self {
-                return "These keys need s3:PutObject, s3:GetObject and s3:ListBucket. \(error.localizedDescription)"
+            switch self {
+            case let .needsReadAccess(error): "These keys need s3:PutObject, s3:GetObject and s3:ListBucket. \(error.localizedDescription)"
             }
-            return nil
         }
     }
 
@@ -207,7 +207,7 @@ struct SettingsView: View {
     }
 
     private var syncConfirmation: String {
-        let size = Int64(pendingSync ?? 0) * LibrarySyncEngine.estimatedBytesPerPicture
+        let size = Int64(pendingSync) * LibrarySyncEngine.estimatedBytesPerPicture
         let estimate = size.formatted(.byteCount(style: .file))
         let drive = DriveDestination.isConnected
             ? ""
@@ -217,11 +217,7 @@ struct SettingsView: View {
 
     private func startSync() {
         settings.syncEnabled = true
-        if DriveDestination.isConnected {
-            DriveBackupEngine.start()
-        } else {
-            LibrarySyncEngine.start()
-        }
+        LibrarySyncEngine.startFromUI()
     }
 }
 

@@ -2,7 +2,7 @@ import Foundation
 
 /// What the app remembers about a trip between runs: its album, and the changes the user made
 /// to the automatic picks (here or in Photos).
-struct StoredTrip: Codable, Identifiable, Sendable {
+struct StoredTrip: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
     /// Last detected span. Matched against newly detected trips by overlap.
     var start: Date
@@ -25,8 +25,8 @@ struct StoredTrip: Codable, Identifiable, Sendable {
     /// The user deleted the album, so another isn't made unless they ask.
     var declined = false
 
-    init(id: UUID = UUID(), start: Date, end: Date) {
-        self.id = id
+    init(start: Date, end: Date) {
+        id = UUID()
         self.start = start
         self.end = end
     }

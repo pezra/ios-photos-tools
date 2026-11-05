@@ -23,13 +23,17 @@ enum BackgroundTasks {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: backupTaskID)
             return
         }
-        let request = BGProcessingTaskRequest(identifier: backupTaskID)
+        submit(backupTaskID, needsNetwork: true, label: "background backup")
+    }
+
+    private static func submit(_ identifier: String, needsNetwork: Bool, label: String) {
+        let request = BGProcessingTaskRequest(identifier: identifier)
         request.requiresExternalPower = false
-        request.requiresNetworkConnectivity = true
+        request.requiresNetworkConnectivity = needsNetwork
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            print("Couldn't schedule background backup: \(error)")
+            print("Couldn't schedule \(label): \(error)")
         }
     }
 
@@ -55,14 +59,7 @@ enum BackgroundTasks {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: tripsTaskID)
             return
         }
-        let request = BGProcessingTaskRequest(identifier: tripsTaskID)
-        request.requiresExternalPower = false
-        request.requiresNetworkConnectivity = false
-        do {
-            try BGTaskScheduler.shared.submit(request)
-        } catch {
-            print("Couldn't schedule trip albums: \(error)")
-        }
+        submit(tripsTaskID, needsNetwork: false, label: "trip albums")
     }
 
     private static func handleTrips(_ task: BGProcessingTask) {

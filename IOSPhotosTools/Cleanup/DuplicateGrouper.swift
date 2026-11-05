@@ -1,4 +1,6 @@
 import Foundation
+import Photos
+import TripKit
 
 /// A photo to consider for grouping: its analysis plus library details that can change without
 /// the pixels changing.
@@ -10,6 +12,13 @@ struct Candidate: Sendable {
     let burstID: String?
 
     var id: String { analysis.assetID }
+}
+
+extension Candidate {
+    init(analysis: PhotoAnalysis, asset: PHAsset) {
+        self.init(analysis: analysis, createdAt: asset.creationDate, isFavorite: asset.isFavorite,
+                  isEdited: asset.hasAdjustments, burstID: asset.burstIdentifier)
+    }
 }
 
 /// Photos that look like the same shot, best first.
@@ -66,7 +75,7 @@ enum DuplicateGrouper {
     static func areSimilar(_ a: Candidate, _ b: Candidate, options: Options) -> Bool {
         if let burst = a.burstID, burst == b.burstID { return true }
         if ImageMetrics.hammingDistance(a.analysis.dHash, b.analysis.dHash) <= options.maxHashDistance { return true }
-        return ImageMetrics.distance(a.analysis.featurePrint, b.analysis.featurePrint) <= options.maxFeatureDistance
+        return FeaturePrint.distance(a.analysis.featurePrint, b.analysis.featurePrint) <= options.maxFeatureDistance
     }
 
     // MARK: - Steps
@@ -119,7 +128,7 @@ enum DuplicateGrouper {
                     continue
                 }
                 // Featureless images (all black, all sky) can share a hash; make sure they match.
-                if ImageMetrics.distance(first.candidate.analysis.featurePrint, a.featurePrint) <= options.maxFeatureDistance / 3 {
+                if FeaturePrint.distance(first.candidate.analysis.featurePrint, a.featurePrint) <= options.maxFeatureDistance / 3 {
                     parent[root(index)] = root(first.cluster)
                 }
             }
@@ -131,7 +140,7 @@ enum DuplicateGrouper {
     }
 
     private static func worstDistance(_ cluster: [Candidate], _ candidate: Candidate) -> Float {
-        cluster.map { ImageMetrics.distance($0.analysis.featurePrint, candidate.analysis.featurePrint) }.max() ?? 0
+        cluster.map { FeaturePrint.distance($0.analysis.featurePrint, candidate.analysis.featurePrint) }.max() ?? 0
     }
 }
 

@@ -44,22 +44,4 @@ public enum HandledPathsFile {
         let decoder = JSONDecoder()
         return data.split(separator: UInt8(ascii: "\n")).compactMap { try? decoder.decode(HandledPath.self, from: Data($0)) }
     }
-
-    /// Combines copies of the file. Paths are only ever added, so the union is always right and one
-    /// copy being stale or missing does no harm.
-    public static func merge(_ copies: [HandledPath]...) -> [HandledPath] {
-        var merged: [String: HandledPath] = [:]
-        for entry in copies.joined() {
-            let key = LibraryPath.normalized(entry.path)
-            guard var existing = merged[key] else {
-                merged[key] = entry
-                continue
-            }
-            existing.resourceID = existing.resourceID ?? entry.resourceID
-            if entry.onDrive == true { existing.onDrive = true }
-            if entry.kind == .backup { existing.kind = .backup }
-            merged[key] = existing
-        }
-        return Array(merged.values)
-    }
 }

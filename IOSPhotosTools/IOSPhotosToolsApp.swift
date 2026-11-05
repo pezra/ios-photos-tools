@@ -22,7 +22,7 @@ struct IOSPhotosToolsApp: App {
             case .active:
                 status.refresh()
                 // A backup pass ends by syncing, so that new backups count as dealt with first.
-                if settings.autoBackup { BackupEngine.start() } else if settings.syncEnabled { LibrarySyncEngine.start() }
+                if settings.autoBackup { BackupEngine.start() } else { LibrarySyncEngine.start() }
                 if settings.tripAlbums { TripsModel.shared.start() }
                 DriveMonitor.shared.start()
             case .background:

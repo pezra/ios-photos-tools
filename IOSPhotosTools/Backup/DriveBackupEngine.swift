@@ -2,6 +2,7 @@ import BackgroundTasks
 import Foundation
 import Photos
 import S3Kit
+import SyncKit
 import UIKit
 
 /// Copies the photo library to the folder chosen on a USB drive, using the same layout as the
@@ -118,7 +119,7 @@ actor DriveBackupEngine {
             : "Up to date"
         await report(phase: phase, running: false, error: lastError, finished: !Task.isCancelled && !disconnected)
 
-        if !Task.isCancelled && !disconnected && SettingsStore.syncEnabled {
+        if !Task.isCancelled && !disconnected {
             await LibrarySyncEngine.shared.run { phase, done, total in
                 Task { await DriveBackupEngine.shared.showSyncProgress(phase, done: done, total: total) }
             }
@@ -133,14 +134,12 @@ actor DriveBackupEngine {
 
     /// Off the actor because walking the drive takes a while, and pausing has to be able to get through.
     private nonisolated func prepareInventory(root: URL, driveID: String) async throws {
-        try StorageInventory.mergeHandledPaths(fromDrive: root, driveID: driveID)
-        try StorageInventory.refreshDrive(root: root)
+        try StorageInventory.prepareDrive(root: root, driveID: driveID)
         // The bucket's last listing will do if it can't be reached now, but there must be one.
         guard let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3),
               !StorageInventory.hasListedS3(client: client, prefix: settings.prefix)
         else { return }
-        try await StorageInventory.mergeHandledPaths(fromS3: client, prefix: settings.prefix)
-        try await StorageInventory.refreshS3(client: client, prefix: settings.prefix)
+        try await StorageInventory.prepareS3(client: client, prefix: settings.prefix)
     }
 
     /// Whether the file at `existing` has the same contents as `resource`.
@@ -148,6 +147,9 @@ actor DriveBackupEngine {
         let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: copy) }
         try await PhotoLibrary.stream(resource, to: copy)
+        // Saves reading the whole file from the drive. A size that can't be read is left for
+        // hashing to report, since it doesn't mean the files differ.
+        if let size = copy.fileSize, let existingSize = existing.fileSize, size != existingSize { return false }
         return try Staging.sha256(of: copy) == Staging.sha256(of: existing)
     }
 
@@ -155,8 +157,9 @@ actor DriveBackupEngine {
         case nameTaken(String)
 
         var errorDescription: String? {
-            if case let .nameTaken(path) = self { return "A different picture is already at \(path). This photo will get a new name on the next pass." }
-            return nil
+            switch self {
+            case let .nameTaken(path): "A different picture is already at \(path). This photo will get a new name on the next pass."
+            }
         }
     }
 

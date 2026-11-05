@@ -15,7 +15,7 @@ public struct BackupFile: Sendable, Equatable {
 /// Decides where a photo's files go: `<year>/<name>`, in the layout of the picture library.
 public enum BackupNaming {
     public static func folder(year: Int?) -> String {
-        year.map { String(format: "%04d", $0) } ?? "undated"
+        year.map { String(format: "%04d", $0) } ?? LibraryPath.undatedFolder
     }
 
     /// The paths of a photo's files, in order. `suffix` 0 is the plain name; higher ones give

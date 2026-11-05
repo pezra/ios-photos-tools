@@ -3,7 +3,6 @@ import Foundation
 import Photos
 import S3Kit
 import SyncKit
-import UniformTypeIdentifiers
 
 /// Keeps a low-resolution copy of every picture in storage in the Photos library.
 ///
@@ -26,6 +25,14 @@ actor LibrarySyncEngine {
 
     nonisolated static func start() {
         Task { _ = await shared.startPass() }
+    }
+
+    /// Starts from the UI, through the drive pass if the drive's here, which keeps going when the
+    /// app is closed. Checking for the drive can be slow, so it's done off the main thread.
+    nonisolated static func startFromUI() {
+        Task.detached {
+            if DriveDestination.isConnected { await DriveBackupEngine.start() } else { start() }
+        }
     }
 
     nonisolated static func stop() {
@@ -114,12 +121,11 @@ actor LibrarySyncEngine {
         try? FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: workspace) }
 
-        var imported = 0
         var failed = 0
         var lastError: String?
         var stoppedFor: String?
 
-        batches: for start in stride(from: 0, to: pending.count, by: batchSize) {
+        for start in stride(from: 0, to: pending.count, by: batchSize) {
             if Task.isCancelled { break }
             guard hasRoom else {
                 stoppedFor = "Paused: less than 10 GB free"
@@ -130,9 +136,9 @@ actor LibrarySyncEngine {
 
             let prepared = await prepare(batch, sources: sources, workspace: workspace)
             if Task.isCancelled { break }
-            if let root = sources.drive, (try? root.checkResourceIsReachable()) != true {
+            if let root = sources.drive?.root, (try? root.checkResourceIsReachable()) != true {
                 stoppedFor = "Drive disconnected"
-                break batches
+                break
             }
 
             var ready: [Prepared] = []
@@ -145,7 +151,6 @@ actor LibrarySyncEngine {
                 }
             }
             let outcome = await importToLibrary(ready, albums: album)
-            imported += outcome.imported
             failed += outcome.failed
             lastError = outcome.lastError ?? lastError
             for item in ready { try? FileManager.default.removeItem(at: item.output.file) }
@@ -175,14 +180,12 @@ actor LibrarySyncEngine {
     /// could be reached, which it needn't be if the drive is here. Off the actor because walking the
     /// drive takes a while, and pausing has to be able to get through.
     private nonisolated func prepareInventory(_ sources: Sources) async throws -> Bool {
-        if let root = sources.drive, let driveID = sources.driveID {
-            try StorageInventory.mergeHandledPaths(fromDrive: root, driveID: driveID)
-            try StorageInventory.refreshDrive(root: root)
+        if let drive = sources.drive {
+            try StorageInventory.prepareDrive(root: drive.root, driveID: drive.id)
         }
         guard let bucket = sources.bucket else { return false }
         do {
-            try await StorageInventory.mergeHandledPaths(fromS3: bucket.client, prefix: bucket.prefix, session: bucket.session)
-            try await StorageInventory.refreshS3(client: bucket.client, prefix: bucket.prefix, session: bucket.session)
+            try await StorageInventory.prepareS3(client: bucket.client, prefix: bucket.prefix, session: bucket.session)
             return true
         } catch {
             if sources.drive == nil { throw error }
@@ -200,7 +203,7 @@ actor LibrarySyncEngine {
     /// actor for the same reason as `prepareInventory`.
     private nonisolated func scanForImportsIfNeeded() async throws {
         if store.meta("imports-scanned") != nil {
-            let known = Array(store.importedAssetIDs().prefix(100))
+            let known = store.sampleImportedAssetIDs(limit: 100)
             let isStale = !known.isEmpty && PHAsset.fetchAssets(withLocalIdentifiers: known, options: nil).count == 0
             guard isStale else { return }
         }
@@ -214,11 +217,8 @@ actor LibrarySyncEngine {
                 stop.pointee = true
                 return
             }
-            for resource in PHAssetResource.assetResources(for: asset) {
-                if let tag = LibraryPath.tag(inFilename: resource.originalFilename) {
-                    found.append((asset.localIdentifier, tag))
-                    break
-                }
+            if let tag = PhotoLibrary.importTag(in: PHAssetResource.assetResources(for: asset)) {
+                found.append((asset.localIdentifier, tag))
             }
         }
         if cancelled { throw CancellationError() }
@@ -230,8 +230,8 @@ actor LibrarySyncEngine {
     }
 
     private func writeHandledPaths(_ sources: Sources, force: Bool) async {
-        if let root = sources.drive, let driveID = sources.driveID {
-            StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: force)
+        if let drive = sources.drive {
+            StorageInventory.writeHandledPaths(toDrive: drive.root, driveID: drive.id, force: force)
         }
         if let bucket = sources.bucket {
             await StorageInventory.writeHandledPaths(toS3: bucket.client, prefix: bucket.prefix, force: force, session: bucket.session)
@@ -247,7 +247,7 @@ actor LibrarySyncEngine {
 
     private func prepare(_ batch: [ImportCandidate], sources: Sources, workspace: URL) async -> [(ImportCandidate, Result<Prepared, Error>)] {
         // Sendable copies for the child tasks.
-        let drive = sources.drive
+        let drive = sources.drive?.root
         let bucket = sources.bucket
         // Downloads wait on the network, so more can run at once than when reading from the drive.
         let width = drive == nil ? 4 : 2
@@ -280,8 +280,7 @@ actor LibrarySyncEngine {
             return Prepared(path: item.path, output: output)
         }
         guard let bucket else { throw CocoaError(.fileNoSuchFile) }
-        let key = [bucket.prefix, item.path].filter { !$0.isEmpty }.joined(separator: "/")
-        let download = try await bucket.client.downloadObject(key: key, session: bucket.session)
+        let download = try await bucket.client.downloadObject(key: LibraryPath.key(prefix: bucket.prefix, path: item.path), session: bucket.session)
         // ImageIO goes by contents, but the extension is used for a file passed through unchanged.
         let named = workspace.appendingPathComponent(UUID().uuidString).appendingPathExtension((item.path as NSString).pathExtension)
         defer {
@@ -296,7 +295,6 @@ actor LibrarySyncEngine {
     // MARK: - Adding to Photos
 
     private struct ImportOutcome {
-        var imported = 0
         var failed = 0
         var lastError: String?
     }
@@ -307,12 +305,11 @@ actor LibrarySyncEngine {
         guard !items.isEmpty else { return ImportOutcome() }
         do {
             store.recordImports(try await Self.create(items, albums: albums))
-            return ImportOutcome(imported: items.count)
+            return ImportOutcome()
         } catch where items.count > 1 {
             var outcome = ImportOutcome()
             for item in items {
                 let single = await importToLibrary([item], albums: albums)
-                outcome.imported += single.imported
                 outcome.failed += single.failed
                 outcome.lastError = single.lastError ?? outcome.lastError
             }
@@ -324,7 +321,7 @@ actor LibrarySyncEngine {
 
     private static func create(_ items: [Prepared], albums: Albums) async throws -> [(assetID: String, path: String)] {
         final class Created: @unchecked Sendable {
-            var rows: [(id: String, path: String)] = []
+            var rows: [(assetID: String, path: String)] = []
         }
         let created = Created()
         try await PHPhotoLibrary.shared().performChanges {
@@ -350,7 +347,7 @@ actor LibrarySyncEngine {
                 if LibraryPath.isUndated(item.path) { undatedRequest?.addAssets([placeholder] as NSArray) }
             }
         }
-        return created.rows.map { (assetID: $0.id, path: $0.path) }
+        return created.rows
     }
 
     /// The albums imported photos go in, found by name.
@@ -416,16 +413,14 @@ private struct Bucket: Sendable {
 }
 
 /// The drive, if it's connected, and the bucket, if it's set up.
-private final class Sources: Sendable {
-    let drive: URL?
-    let driveID: String?
-    let bucket: Bucket?
-
-    private init(drive: URL?, driveID: String?, bucket: Bucket?) {
-        self.drive = drive
-        self.driveID = driveID
-        self.bucket = bucket
+private struct Sources: Sendable {
+    struct Drive: Sendable {
+        let root: URL
+        let id: String
     }
+
+    let drive: Drive?
+    let bucket: Bucket?
 
     static func open() -> Sources {
         var bucket: Bucket?
@@ -434,14 +429,14 @@ private final class Sources: Sendable {
             config.allowsCellularAccess = settings.allowCellular
             bucket = Bucket(client: client, prefix: settings.prefix, session: URLSession(configuration: config))
         }
-        let driveID = DriveDestination.id
-        return Sources(drive: driveID == nil ? nil : DriveDestination.open(), driveID: driveID, bucket: bucket)
+        let drive = DriveDestination.id.flatMap { id in DriveDestination.open().map { Drive(root: $0, id: id) } }
+        return Sources(drive: drive, bucket: bucket)
     }
 
     var isAvailable: Bool { drive != nil || bucket != nil }
 
     func close() {
-        if let drive { DriveDestination.close(drive) }
+        if let drive { DriveDestination.close(drive.root) }
         bucket?.session.finishTasksAndInvalidate()
     }
 }

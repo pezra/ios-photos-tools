@@ -1,7 +1,6 @@
 import Observation
 import Photos
 import TripKit
-import UIKit
 
 /// Finds trips in the library and keeps an album of the best photos from each one. The user can
 /// change what's in an album here or in Photos, and those changes stick.
@@ -31,7 +30,7 @@ final class TripsModel {
     private(set) var trips: [Trip] = []
 
     private var stored = TripStore.load() {
-        didSet { TripStore.save(stored) }
+        didSet { if stored != oldValue { TripStore.save(stored) } }
     }
     private var detected: [UUID: DetectedTrip] = [:]
     private var order: [UUID] = []
@@ -80,15 +79,18 @@ final class TripsModel {
         phase = "Looking for trips…"
         defer { isSyncing = false }
 
-        let library = await Task.detached { Self.fetchLibrary() }.value
-        match(TripDetector.trips(library.photos, now: Date()))
+        let (found, modified) = await Task.detached {
+            let library = Self.fetchLibrary()
+            return (TripDetector.trips(library.photos, now: Date()), library.modified)
+        }.value
+        match(found)
 
         let autoCreate = SettingsStore.tripAlbums
         for id in order {
             guard !Task.isCancelled, let trip = detected[id], let saved = stored[id] else { continue }
             let wanted = saved.albumID != nil
                 || (autoCreate && trip.isFinished && !saved.declined)
-            if wanted { await refresh(id, modified: library.modified) }
+            if wanted { await refresh(id, modified: modified) }
         }
         publish()
 
@@ -174,8 +176,7 @@ final class TripsModel {
         return trip.sites.flatMap { site in
             let candidates = site.photoIDs.compactMap { id -> Candidate? in
                 guard let asset = assets[id], let analysis = analyses[id] else { return nil }
-                return Candidate(analysis: analysis, createdAt: asset.creationDate, isFavorite: asset.isFavorite,
-                                 isEdited: asset.hasAdjustments, burstID: asset.burstIdentifier)
+                return Candidate(analysis: analysis, asset: asset)
             }
             // Keep only the best of each set of retakes, so a site's picks aren't the same shot.
             let retakes = Set(DuplicateGrouper.groups(candidates).flatMap { $0.assetIDs.dropFirst() })
@@ -303,13 +304,12 @@ final class TripsModel {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         let wanted = PHAsset.fetchAssets(withLocalIdentifiers: Array(trip.wanted), options: options)
-        var wantedIDs: [String] = []
-        wanted.enumerateObjects { asset, _, _ in wantedIDs.append(asset.localIdentifier) }
+        let wantedIDs = Self.assetIDs(of: wanted)
 
         do {
             if let albumID = trip.albumID, let album = Self.album(albumID) {
                 let current = PHAsset.fetchAssets(in: album, options: nil)
-                let changesPhotos = Set(Self.assetIDs(in: album)) != Set(wantedIDs)
+                let changesPhotos = Set(Self.assetIDs(of: current)) != Set(wantedIDs)
                 let changesTitle = album.localizedTitle != title
                 if changesPhotos || changesTitle {
                     try await PHPhotoLibrary.shared().performChanges {
@@ -390,8 +390,12 @@ final class TripsModel {
     }
 
     private static func assetIDs(in album: PHAssetCollection) -> [String] {
+        assetIDs(of: PHAsset.fetchAssets(in: album, options: nil))
+    }
+
+    private static func assetIDs(of assets: PHFetchResult<PHAsset>) -> [String] {
         var ids: [String] = []
-        PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { asset, _, _ in ids.append(asset.localIdentifier) }
+        assets.enumerateObjects { asset, _, _ in ids.append(asset.localIdentifier) }
         return ids
     }
 
@@ -419,11 +423,9 @@ final class TripsModel {
     nonisolated private static func fetchLibrary() -> (photos: [TripPhoto], modified: [String: Double]) {
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        let imported = BackupStore.shared.importedAssetIDs()
         var photos: [TripPhoto] = []
         var modified: [String: Double] = [:]
-        PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
-            guard !imported.contains(asset.localIdentifier) else { return }
+        PhotoLibrary.enumerateOwnAssets(PHAsset.fetchAssets(with: options)) { asset in
             guard let date = asset.creationDate, !asset.mediaSubtypes.contains(.photoScreenshot) else { return }
             let coordinate = asset.location.map {
                 Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)

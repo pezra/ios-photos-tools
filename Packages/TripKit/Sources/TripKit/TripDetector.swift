@@ -1,6 +1,6 @@
 import Foundation
 
-public struct Coordinate: Sendable, Hashable, Codable {
+public struct Coordinate: Sendable, Hashable {
     public let latitude: Double
     public let longitude: Double
 
@@ -186,11 +186,10 @@ public enum TripDetector {
 
         var visits: [Builder] = []
         for photo in tagged {
-            if var last = visits.last,
+            if let last = visits.last,
                photo.date.timeIntervalSince(last.photos.last!.date) <= options.siteGap,
                last.center.distance(to: photo.coordinate!) <= options.siteRadius {
-                last.add(photo)
-                visits[visits.count - 1] = last
+                visits[visits.count - 1].add(photo)
             } else {
                 visits.append(Builder(photo))
             }

@@ -135,10 +135,7 @@ struct ContentView: View {
             isRunning: sync.isRunning,
             canStart: PhotoLibrary.hasFullAccess,
             startTitle: "Sync now",
-            start: {
-                // Through the drive pass, which keeps going when the app is closed.
-                if drive.isConnected { DriveBackupEngine.start() } else { LibrarySyncEngine.start() }
-            },
+            start: { LibrarySyncEngine.startFromUI() },
             stop: { LibrarySyncEngine.stop() }
         )
     }

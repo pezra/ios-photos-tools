@@ -63,20 +63,4 @@ final class HandledPathsTests: XCTestCase {
         data.append(Data("{\"path\":\"2007/b".utf8))
         XCTAssertEqual(HandledPathsFile.decode(data).map(\.path), ["2007/a.jpg"])
     }
-
-    func testMergeIsUnionAcrossSpellings() {
-        let merged = HandledPathsFile.merge(
-            [HandledPath(path: "2007/A.jpg", kind: .import)],
-            [HandledPath(path: "2007/a.JPG", kind: .import), HandledPath(path: "2008/b.jpg", kind: .import)]
-        )
-        XCTAssertEqual(merged.count, 2)
-    }
-
-    func testMergeKeepsTheMostInformation() {
-        let merged = HandledPathsFile.merge(
-            [HandledPath(path: "2026/a.HEIC", kind: .backup, resourceID: "id", onDrive: nil)],
-            [HandledPath(path: "2026/a.HEIC", kind: .backup, resourceID: nil, onDrive: true)]
-        )
-        XCTAssertEqual(merged, [HandledPath(path: "2026/a.HEIC", kind: .backup, resourceID: "id", onDrive: true)])
-    }
 }

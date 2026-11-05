@@ -67,9 +67,12 @@ final class AnalysisStore: @unchecked Sendable {
     func analyses(_ ids: [String]) -> [String: PhotoAnalysis] {
         locked {
             var result: [String: PhotoAnalysis] = [:]
-            for id in ids {
-                if let row = query("SELECT \(Self.columns) FROM analyses WHERE id = ?", [id], analysis).first {
-                    result[id] = row
+            // In groups, since SQLite limits how many values one statement can take.
+            for start in stride(from: 0, to: ids.count, by: 500) {
+                let group = Array(ids[start..<min(start + 500, ids.count)])
+                let marks = Array(repeating: "?", count: group.count).joined(separator: ", ")
+                for row in query("SELECT \(Self.columns) FROM analyses WHERE id IN (\(marks))", group, analysis) {
+                    result[row.assetID] = row
                 }
             }
             return result

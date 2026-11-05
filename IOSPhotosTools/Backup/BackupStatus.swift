@@ -42,10 +42,7 @@ final class BackupStatus {
         Task.detached(priority: .utility) {
             var ids: [String] = []
             if authorized {
-                let imported = BackupStore.shared.importedAssetIDs()
-                PhotoLibrary.fetchAllAssets().enumerateObjects { asset, _, _ in
-                    if !imported.contains(asset.localIdentifier) { ids.append(asset.localIdentifier) }
-                }
+                PhotoLibrary.enumerateOwnAssets(PhotoLibrary.fetchAllAssets()) { ids.append($0.localIdentifier) }
             }
             BackupStore.shared.setLibraryAssets(ids)
             await MainActor.run {

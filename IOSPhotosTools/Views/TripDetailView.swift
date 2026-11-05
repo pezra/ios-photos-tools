@@ -89,11 +89,9 @@ private struct SiteSection: View {
     let site: Site
     @State private var place: PlaceNames.Place?
 
-    private var inAlbum: [String] {
-        site.photoIDs.filter { trip.albumPhotos.contains($0) }
-    }
-
     var body: some View {
+        let albumPhotos = trip.albumPhotos
+        let inAlbum = site.photoIDs.filter { albumPhotos.contains($0) }
         Section {
             if trip.hasAlbum {
                 if inAlbum.isEmpty {

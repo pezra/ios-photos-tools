@@ -1,6 +1,6 @@
 import Foundation
 
-public enum StorageSource: String, Sendable, Codable {
+public enum StorageSource: String, Sendable {
     case drive
     case s3
 }

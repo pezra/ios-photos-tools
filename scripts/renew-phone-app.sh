@@ -45,21 +45,23 @@ if [[ -z "$MODE" && $remaining -gt $RENEW_WITHIN_SECONDS ]]; then
     exit 0
 fi
 
-fail() {
-    log "FAILED: $1"
-    # Failing early is normal, since it's tried again in a few hours. Only say so once it's urgent.
+# Failing early is normal, since it's tried again in a few hours. Only say so once it's urgent.
+notify_if_urgent() {
     if [[ $remaining -lt $((24 * 60 * 60)) ]]; then
         notify "$1 The app expires soon."
     fi
+}
+
+fail() {
+    log "FAILED: $1"
+    notify_if_urgent "$1"
     exit 1
 }
 
 if [[ "$MODE" != "--dry-run" ]]; then
     xcrun devicectl device info details --device "$DEVICE_ID" >/dev/null 2>&1 || {
         log "Phone not reachable; will try again."
-        if [[ $remaining -lt $((24 * 60 * 60)) ]]; then
-            notify "Connect your phone to this Mac. The app expires soon."
-        fi
+        notify_if_urgent "Connect your phone to this Mac."
         exit 0
     }
 fi

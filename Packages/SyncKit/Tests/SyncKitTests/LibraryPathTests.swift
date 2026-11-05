@@ -7,6 +7,11 @@ final class LibraryPathTests: XCTestCase {
         XCTAssertEqual(LibraryPath.normalized("undated/caf\u{00E9}.jpg"), LibraryPath.normalized("undated/cafe\u{0301}.jpg"))
     }
 
+    func testKeyOmitsAnEmptyPrefix() {
+        XCTAssertEqual(LibraryPath.key(prefix: "photos", path: "2007/a.jpg"), "photos/2007/a.jpg")
+        XCTAssertEqual(LibraryPath.key(prefix: "", path: "2007/a.jpg"), "2007/a.jpg")
+    }
+
     func testTagIsStableAcrossSpellingsAndDiffersByFolder() {
         XCTAssertEqual(LibraryPath.tag(for: "2007/IMG_1.JPG"), LibraryPath.tag(for: "2007/img_1.jpg"))
         XCTAssertNotEqual(LibraryPath.tag(for: "2007/IMG_1.JPG"), LibraryPath.tag(for: "2008/IMG_1.JPG"))

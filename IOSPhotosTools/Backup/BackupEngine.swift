@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import S3Kit
+import SyncKit
 
 /// Finds assets that haven't been backed up, exports their files and hands them to the
 /// background upload session.
@@ -72,8 +73,7 @@ actor BackupEngine {
         // listing nothing can safely be uploaded.
         if !pending.isEmpty {
             do {
-                try await StorageInventory.mergeHandledPaths(fromS3: client, prefix: settings.prefix)
-                try await StorageInventory.refreshS3(client: client, prefix: settings.prefix)
+                try await StorageInventory.prepareS3(client: client, prefix: settings.prefix)
             } catch {
                 await report(phase: "Couldn't list the bucket", running: false,
                              error: "Backup needs s3:ListBucket and s3:GetObject as well as s3:PutObject. \(error.localizedDescription)")
@@ -159,8 +159,10 @@ actor BackupEngine {
                 Staging.remove(stagedName)
                 continue
             }
-            if previous?.state != .done, let inBucket,
-               (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) == inBucket.size {
+            // An edit of the same size can still be a different edit. If the comparison fails, it's
+            // uploaded, which is safe because this path is its own.
+            if previous?.state != .done, let inBucket, let sha256, file.fileSize == inBucket.size,
+               (try? await bucketHash(of: inBucket, client: client, settings: settings)) == sha256 {
                 Staging.remove(stagedName)
                 store.markDone(row.id, sha256: sha256)
                 continue
@@ -180,6 +182,16 @@ actor BackupEngine {
         store.markAssetCompleteIfFinished(assetID)
         await MainActor.run { BackupStatus.shared.refreshCounts() }
         return nil
+    }
+
+    private func bucketHash(of entry: InventoryEntry, client: S3Client, settings: SettingsStore.Snapshot) async throws -> String {
+        let config = URLSessionConfiguration.default
+        config.allowsCellularAccess = settings.allowCellular
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        let file = try await client.downloadObject(key: LibraryPath.key(prefix: settings.prefix, path: entry.path), session: session)
+        defer { try? FileManager.default.removeItem(at: file) }
+        return try Staging.sha256(of: file)
     }
 
     private func waitForUploadSlot() async {

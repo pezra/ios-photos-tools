@@ -198,8 +198,7 @@ public struct S3Client: Sendable {
         if let contentType { headers["content-type"] = contentType }
         let request = signedRequest(method: "PUT", key: key, headers: headers, payloadHash: SigV4.sha256Hex(data))
         let (body, response) = try await session.upload(for: request, from: data)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(status) else { throw S3Error.from(status: status, body: body) }
+        _ = try checked(body, response)
     }
 
     /// Every object whose key starts with `prefix`. Needs `s3:ListBucket`.
@@ -211,9 +210,7 @@ public struct S3Client: Sendable {
             if let token { query.append(("continuation-token", token)) }
             let request = signedRequest(method: "GET", key: nil, query: query, payloadHash: SigV4.sha256Hex(Data()))
             let (body, response) = try await session.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            guard (200..<300).contains(status) else { throw S3Error.from(status: status, body: body) }
-            let page = S3ListPage(xml: body)
+            let page = S3ListPage(xml: try checked(body, response))
             objects += page.objects
             token = page.nextContinuationToken
         } while token != nil
@@ -224,9 +221,7 @@ public struct S3Client: Sendable {
     public func getObject(key: String, session: URLSession = .shared) async throws -> Data {
         let request = signedRequest(method: "GET", key: key, payloadHash: SigV4.sha256Hex(Data()))
         let (body, response) = try await session.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(status) else { throw S3Error.from(status: status, body: body) }
-        return body
+        return try checked(body, response)
     }
 
     /// Downloads an object to a temporary file, which the caller must move or delete.
@@ -243,6 +238,13 @@ public struct S3Client: Sendable {
     }
 
     // MARK: - Private
+
+    /// The body of a successful response; anything else throws the error it describes.
+    private func checked(_ body: Data, _ response: URLResponse) throws -> Data {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else { throw S3Error.from(status: status, body: body) }
+        return body
+    }
 
     private func credentialScope(_ dateStamp: String) -> String {
         "\(dateStamp)/\(config.region)/s3/aws4_request"

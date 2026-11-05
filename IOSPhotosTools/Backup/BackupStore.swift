@@ -17,6 +17,19 @@ struct ResourceRow {
     let path: String
     /// `path` under the bucket's folder.
     let s3Key: String
+
+    /// Resource IDs start with the asset's identifier.
+    static func assetID(ofResource id: String) -> String {
+        id.split(separator: "#").first.map(String.init) ?? id
+    }
+}
+
+/// Who a library path belongs to.
+enum PathHolder {
+    case free
+    /// Handled, but not by a resource: an imported or retired path.
+    case released
+    case resource(String)
 }
 
 /// Persistent record of what has been backed up, in a small SQLite database.
@@ -276,13 +289,8 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    /// Who holds a path: nil if nobody, otherwise the resource (nil for an imported or retired path).
-    func pathHolder(_ path: String) -> String?? {
-        let norm = LibraryPath.normalized(path)
-        return locked {
-            let rows: [String?] = query("SELECT resource_id FROM handled_paths WHERE norm = ?", [norm]) { text($0, 0) }
-            return rows.first
-        }
+    func pathHolder(_ path: String) -> PathHolder {
+        locked { holder(ofPath: path) }
     }
 
     /// Lets go of a path whose resource is gone, such as after restoring to a phone where asset
@@ -296,17 +304,16 @@ final class BackupStore: @unchecked Sendable {
     func claim(_ rows: [ResourceRow]) -> Bool {
         locked {
             for row in rows {
-                let holder: [String?] = query("SELECT resource_id FROM handled_paths WHERE norm = ?", [LibraryPath.normalized(row.path)]) { text($0, 0) }
-                if let current = holder.first, let current, current != row.id { return false }
+                if case let .resource(current) = holder(ofPath: row.path), current != row.id { return false }
             }
-            execute("BEGIN")
-            for row in rows {
-                execute("""
-                    INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(norm) DO UPDATE SET kind = excluded.kind, resource_id = excluded.resource_id, asset_id = excluded.asset_id
-                    """, [LibraryPath.normalized(row.path), row.path, HandledPath.Kind.backup.rawValue, row.id, row.assetID])
+            transaction {
+                for row in rows {
+                    execute("""
+                        INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(norm) DO UPDATE SET kind = excluded.kind, resource_id = excluded.resource_id, asset_id = excluded.asset_id
+                        """, [LibraryPath.normalized(row.path), row.path, HandledPath.Kind.backup.rawValue, row.id, row.assetID])
+                }
             }
-            execute("COMMIT")
             bumpHandledVersion()
             return true
         }
@@ -377,16 +384,15 @@ final class BackupStore: @unchecked Sendable {
     func mergeHandled(_ entries: [HandledPath]) {
         guard !entries.isEmpty else { return }
         locked {
-            execute("BEGIN")
-            for entry in entries {
-                // Resource IDs start with the asset's identifier.
-                let assetID = entry.resourceID?.split(separator: "#").first.map(String.init)
-                execute("""
-                    INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id, on_drive) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(norm) DO UPDATE SET on_drive = MAX(on_drive, excluded.on_drive)
-                    """, [LibraryPath.normalized(entry.path), entry.path, entry.kind.rawValue, entry.resourceID, assetID, entry.onDrive == true ? 1 : 0])
+            transaction {
+                for entry in entries {
+                    let assetID = entry.resourceID.map(ResourceRow.assetID(ofResource:))
+                    execute("""
+                        INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id, on_drive) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(norm) DO UPDATE SET on_drive = MAX(on_drive, excluded.on_drive)
+                        """, [LibraryPath.normalized(entry.path), entry.path, entry.kind.rawValue, entry.resourceID, assetID, entry.onDrive == true ? 1 : 0])
+                }
             }
-            execute("COMMIT")
             bumpHandledVersion()
         }
     }
@@ -405,44 +411,36 @@ final class BackupStore: @unchecked Sendable {
         locked { query("SELECT value FROM meta WHERE key = ?", [key]) { text($0, 0) }.first ?? nil }
     }
 
-    func setMeta(_ key: String, _ value: String?) {
-        locked {
-            if let value {
-                execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", [key, value])
-            } else {
-                execute("DELETE FROM meta WHERE key = ?", [key])
-            }
-        }
+    func setMeta(_ key: String, _ value: String) {
+        locked { execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", [key, value]) }
     }
 
     // MARK: - What's in storage
 
     func replaceInventory(source: StorageSource, entries: [InventoryEntry]) {
+        let rows = entries.map { (norm: LibraryPath.normalized($0.path), path: $0.path, size: $0.size) }
         locked {
-            execute("BEGIN")
-            execute("DELETE FROM remote_files WHERE source = ?", [source.rawValue])
-            for entry in entries {
-                execute("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)",
-                        [source.rawValue, LibraryPath.normalized(entry.path), entry.path, Int(entry.size)])
+            transaction {
+                execute("DELETE FROM remote_files WHERE source = ?", [source.rawValue])
+                try insert("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)", [source.rawValue], rows: rows) { stmt, row in
+                    sqlite3_bind_text(stmt, 2, row.norm, -1, Self.transient)
+                    sqlite3_bind_text(stmt, 3, row.path, -1, Self.transient)
+                    sqlite3_bind_int64(stmt, 4, row.size)
+                }
             }
-            execute("COMMIT")
         }
     }
 
     func inventory() -> [InventoryEntry] {
         locked {
-            query("SELECT source, path, size FROM remote_files") { stmt in
-                InventoryEntry(source: StorageSource(rawValue: text(stmt, 0) ?? "") ?? .drive, path: text(stmt, 1) ?? "", size: sqlite3_column_int64(stmt, 2))
-            }
+            query("SELECT source, path, size FROM remote_files", [], inventoryEntry)
         }
     }
 
     /// Where a path is known to exist, with its exact spelling and size there.
     func inventoryEntries(for path: String) -> [InventoryEntry] {
         locked {
-            query("SELECT source, path, size FROM remote_files WHERE norm = ?", [LibraryPath.normalized(path)]) { stmt in
-                InventoryEntry(source: StorageSource(rawValue: text(stmt, 0) ?? "") ?? .drive, path: text(stmt, 1) ?? "", size: sqlite3_column_int64(stmt, 2))
-            }
+            query("SELECT source, path, size FROM remote_files WHERE norm = ?", [LibraryPath.normalized(path)], inventoryEntry)
         }
     }
 
@@ -452,6 +450,11 @@ final class BackupStore: @unchecked Sendable {
         locked { Set(query("SELECT asset_id FROM imported_assets") { text($0, 0) ?? "" }) }
     }
 
+    /// A few of the imported IDs, to check that they still match the library.
+    func sampleImportedAssetIDs(limit: Int) -> [String] {
+        locked { query("SELECT asset_id FROM imported_assets LIMIT ?", [limit]) { text($0, 0) ?? "" } }
+    }
+
     func importedTags() -> Set<String> {
         locked { Set(query("SELECT tag FROM imported_assets") { text($0, 0) ?? "" }) }
     }
@@ -459,13 +462,12 @@ final class BackupStore: @unchecked Sendable {
     func recordImports(_ imports: [(assetID: String, path: String)]) {
         guard !imports.isEmpty else { return }
         locked {
-            execute("BEGIN")
-            for item in imports {
-                execute("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", [item.assetID, LibraryPath.tag(for: item.path)])
-                execute("INSERT OR IGNORE INTO handled_paths (norm, path, kind) VALUES (?, ?, ?)",
-                        [LibraryPath.normalized(item.path), item.path, HandledPath.Kind.import.rawValue])
+            transaction {
+                for item in imports {
+                    execute("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", [item.assetID, LibraryPath.tag(for: item.path)])
+                    addImportedPath(item.path)
+                }
             }
-            execute("COMMIT")
             bumpHandledVersion()
         }
     }
@@ -473,12 +475,12 @@ final class BackupStore: @unchecked Sendable {
     /// Replaces the record of imports with what was found in the Photos library.
     func replaceImportedAssets(_ assets: [(assetID: String, tag: String)]) {
         locked {
-            execute("BEGIN")
-            execute("DELETE FROM imported_assets")
-            for asset in assets {
-                execute("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", [asset.assetID, asset.tag])
+            transaction {
+                execute("DELETE FROM imported_assets")
+                for asset in assets {
+                    execute("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", [asset.assetID, asset.tag])
+                }
             }
-            execute("COMMIT")
         }
     }
 
@@ -486,12 +488,9 @@ final class BackupStore: @unchecked Sendable {
     func markImported(paths: [String]) {
         guard !paths.isEmpty else { return }
         locked {
-            execute("BEGIN")
-            for path in paths {
-                execute("INSERT OR IGNORE INTO handled_paths (norm, path, kind) VALUES (?, ?, ?)",
-                        [LibraryPath.normalized(path), path, HandledPath.Kind.import.rawValue])
+            transaction {
+                for path in paths { addImportedPath(path) }
             }
-            execute("COMMIT")
             bumpHandledVersion()
         }
     }
@@ -514,18 +513,13 @@ final class BackupStore: @unchecked Sendable {
     /// against (so deleted photos aren't counted).
     func setLibraryAssets(_ ids: [String]) {
         locked {
-            execute("BEGIN")
-            execute("DELETE FROM library")
-            if let insert = prepare("INSERT OR IGNORE INTO library (id) VALUES (?)", []) {
-                for id in ids {
-                    sqlite3_bind_text(insert, 1, id, -1, Self.transient)
-                    sqlite3_step(insert)
-                    sqlite3_reset(insert)
+            let saved = transaction {
+                execute("DELETE FROM library")
+                try insert("INSERT OR IGNORE INTO library (id) VALUES (?)", rows: ids) { stmt, id in
+                    sqlite3_bind_text(stmt, 1, id, -1, Self.transient)
                 }
-                sqlite3_finalize(insert)
             }
-            execute("COMMIT")
-            libraryLoaded = true
+            if saved { libraryLoaded = true }
         }
     }
 
@@ -549,6 +543,21 @@ final class BackupStore: @unchecked Sendable {
 
     private var now: Double { Date().timeIntervalSince1970 }
 
+    private func holder(ofPath path: String) -> PathHolder {
+        let rows: [String?] = query("SELECT resource_id FROM handled_paths WHERE norm = ?", [LibraryPath.normalized(path)]) { text($0, 0) }
+        guard let row = rows.first else { return .free }
+        return row.map(PathHolder.resource) ?? .released
+    }
+
+    private func addImportedPath(_ path: String) {
+        execute("INSERT OR IGNORE INTO handled_paths (norm, path, kind) VALUES (?, ?, ?)",
+                [LibraryPath.normalized(path), path, HandledPath.Kind.import.rawValue])
+    }
+
+    private func inventoryEntry(_ stmt: OpaquePointer) -> InventoryEntry {
+        InventoryEntry(source: StorageSource(rawValue: text(stmt, 0) ?? "") ?? .drive, path: text(stmt, 1) ?? "", size: sqlite3_column_int64(stmt, 2))
+    }
+
     private func completeAssetIfFinished(_ assetID: String) {
         let remaining = query("SELECT COUNT(*) FROM resources WHERE asset_id = ? AND state != ?",
                               [assetID, ResourceState.done.rawValue]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
@@ -559,10 +568,43 @@ final class BackupStore: @unchecked Sendable {
             """, [assetID, now, assetID])
     }
 
+    @discardableResult
     private func locked<T>(_ body: () -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
         return body()
+    }
+
+    /// Undone if `body` throws, leaving things as they were. Returns whether it was committed.
+    @discardableResult
+    private func transaction(_ body: () throws -> Void) -> Bool {
+        execute("BEGIN")
+        do {
+            try body()
+            execute("COMMIT")
+            return true
+        } catch {
+            print("SQLite transaction rolled back: \(error)")
+            execute("ROLLBACK")
+            return false
+        }
+    }
+
+    private struct StatementFailure: Error {
+        let message: String
+    }
+
+    /// Runs one statement for each row, stopping at the first failure.
+    private func insert<Row>(_ sql: String, _ args: [Any?] = [], rows: [Row], bind: (OpaquePointer, Row) -> Void) throws {
+        guard let stmt = prepare(sql, args) else { throw StatementFailure(message: "Couldn't prepare \(sql)") }
+        defer { sqlite3_finalize(stmt) }
+        for row in rows {
+            bind(stmt, row)
+            guard sqlite3_step(stmt) == SQLITE_DONE else {
+                throw StatementFailure(message: "\(String(cString: sqlite3_errmsg(db))) — \(sql)")
+            }
+            sqlite3_reset(stmt)
+        }
     }
 
     private func prepare(_ sql: String, _ args: [Any?]) -> OpaquePointer? {

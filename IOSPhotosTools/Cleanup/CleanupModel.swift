@@ -150,10 +150,7 @@ final class CleanupModel {
         }
 
         candidates = assets.compactMap { asset in
-            analyses[asset.localIdentifier].map {
-                Candidate(analysis: $0, createdAt: asset.creationDate, isFavorite: asset.isFavorite,
-                          isEdited: asset.hasAdjustments, burstID: asset.burstIdentifier)
-            }
+            analyses[asset.localIdentifier].map { Candidate(analysis: $0, asset: asset) }
         }
         regroup()
 
@@ -183,11 +180,8 @@ final class CleanupModel {
         let options = PHFetchOptions()
         options.includeAllBurstAssets = true
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        let imported = BackupStore.shared.importedAssetIDs()
         var assets: [PHAsset] = []
-        PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
-            if !imported.contains(asset.localIdentifier) { assets.append(asset) }
-        }
+        PhotoLibrary.enumerateOwnAssets(PHAsset.fetchAssets(with: options)) { assets.append($0) }
         return assets
     }
 }

@@ -29,28 +29,31 @@ enum BackupPaths {
 
         func rows(_ paths: [String]) -> [ResourceRow] {
             zip(ids, paths).map { id, path in
-                ResourceRow(id: id, assetID: asset.localIdentifier, path: path,
-                            s3Key: [prefix, path].filter { !$0.isEmpty }.joined(separator: "/"))
+                ResourceRow(id: id, assetID: asset.localIdentifier, path: path, s3Key: LibraryPath.key(prefix: prefix, path: path))
             }
         }
 
         // Up to a few tries, since another pass could take a name while this one compares files.
         for _ in 0..<5 {
-            let existing = store.paths(forAsset: asset.localIdentifier)
-            var paths: [String]
+            var existing = store.paths(forAsset: asset.localIdentifier)
+            // Every file already holds its path, so there's nothing to claim.
             if ids.allSatisfy({ existing[$0] != nil }) {
-                paths = ids.compactMap { existing[$0] }
+                return Array(zip(resources, rows(ids.compactMap { existing[$0] })))
+            }
+            var paths: [String]
+            if !existing.isEmpty, let extended = extending(existing, ids: ids, files: files, folder: folder) {
+                // A photo edited since its backup: the edit joins the files already there.
+                paths = extended
             } else {
-                if !existing.isEmpty, let extended = extending(existing, ids: ids, files: files, folder: folder) {
-                    // A photo edited since its backup: the edit joins the files already there.
-                    paths = extended
-                } else {
-                    if !existing.isEmpty { store.retirePaths(forAsset: asset.localIdentifier) }
-                    paths = try await resolve(resources: resources, files: files, folder: folder, ownIDs: Set(ids))
+                if !existing.isEmpty {
+                    store.retirePaths(forAsset: asset.localIdentifier)
+                    // They're no longer this photo's, so its edits need their paths checked below.
+                    existing = [:]
                 }
-                for index in paths.indices where files[index].isEdit && existing[ids[index]] == nil {
-                    paths[index] = BackupNaming.editPath(paths[index]) { isTaken($0, ownIDs: Set(ids)) }
-                }
+                paths = try await resolve(resources: resources, files: files, folder: folder, ownIDs: Set(ids))
+            }
+            for index in paths.indices where files[index].isEdit && existing[ids[index]] == nil {
+                paths[index] = BackupNaming.editPath(paths[index]) { isTaken($0, ownIDs: Set(ids)) }
             }
             let result = rows(paths)
             if store.claim(result) { return Array(zip(resources, result)) }
@@ -61,8 +64,11 @@ enum BackupPaths {
     /// Whether something other than this photo's own files is at `path`.
     private static func isTaken(_ path: String, ownIDs: Set<String>) -> Bool {
         let store = BackupStore.shared
-        if let holder = store.pathHolder(path) { return holder.map { !ownIDs.contains($0) } ?? true }
-        return !store.inventoryEntries(for: path).isEmpty
+        switch store.pathHolder(path) {
+        case .free: return !store.inventoryEntries(for: path).isEmpty
+        case .released: return true
+        case let .resource(id): return !ownIDs.contains(id)
+        }
     }
 
     /// The suffix the asset already uses, applied to all of its files.
@@ -87,10 +93,10 @@ enum BackupPaths {
             folder: folder,
             isOccupied: { isTaken($0, ownIDs: ownIDs) },
             isIdentical: { index, path in
-                if let holder = store.pathHolder(path), let holder, !ownIDs.contains(holder) {
+                if case let .resource(holder) = store.pathHolder(path), !ownIDs.contains(holder) {
                     // Another photo's file, unless that photo is gone: after restoring to another
                     // phone the IDs are all different, and this may be the same photo.
-                    let holderAsset = holder.split(separator: "#").first.map(String.init) ?? holder
+                    let holderAsset = ResourceRow.assetID(ofResource: holder)
                     guard PHAsset.fetchAssets(withLocalIdentifiers: [holderAsset], options: nil).count == 0 else { return false }
                     store.releasePath(path)
                 }
@@ -103,8 +109,7 @@ enum BackupPaths {
                 } else {
                     let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                     try await PhotoLibrary.export(resources[index], to: file)
-                    let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? -1
-                    export = Export(file: file, size: size, sha256: try Staging.sha256(of: file))
+                    export = Export(file: file, size: file.fileSize ?? -1, sha256: try Staging.sha256(of: file))
                     exports[index] = export
                 }
                 guard entries.allSatisfy({ $0.size == export.size }) else { return false }
@@ -127,8 +132,7 @@ enum BackupPaths {
         }
         if let entry = entries.first(where: { $0.source == .s3 }), let settings = SettingsStore.snapshot(),
            let client = try? S3Client(config: settings.s3) {
-            let key = [settings.prefix, entry.path].filter { !$0.isEmpty }.joined(separator: "/")
-            let file = try await client.downloadObject(key: key)
+            let file = try await client.downloadObject(key: LibraryPath.key(prefix: settings.prefix, path: entry.path))
             defer { try? FileManager.default.removeItem(at: file) }
             return try Staging.sha256(of: file)
         }

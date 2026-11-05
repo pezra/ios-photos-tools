@@ -110,20 +110,10 @@ public enum TripPicker {
         if let scene = ranked.first(where: { kind($0) == .scene }) { picks.append(scene) }
         for candidate in ranked where picks.count < count {
             guard !picks.contains(where: { $0.id == candidate.id }) else { continue }
-            if picks.allSatisfy({ distance($0.featurePrint, candidate.featurePrint) >= options.minDistance }) {
+            if picks.allSatisfy({ FeaturePrint.distance($0.featurePrint, candidate.featurePrint) >= options.minDistance }) {
                 picks.append(candidate)
             }
         }
         return picks.map(\.id)
-    }
-
-    static func distance(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count else { return .infinity }
-        var sum: Float = 0
-        for i in a.indices {
-            let d = a[i] - b[i]
-            sum += d * d
-        }
-        return sum.squareRoot()
     }
 }

@@ -64,8 +64,23 @@ public enum LibraryPath {
         isLibraryContent(path) && imageExtensions.contains((path as NSString).pathExtension.lowercased())
     }
 
+    /// The folder for pictures with no date.
+    public static let undatedFolder = "undated"
+
     public static func isUndated(_ path: String) -> Bool {
-        path.split(separator: "/").first?.lowercased() == "undated"
+        path.split(separator: "/").first?.lowercased() == undatedFolder
+    }
+
+    /// The bucket key of `path` under the bucket's folder, which may be empty.
+    public static func key(prefix: String, path: String) -> String {
+        prefix.isEmpty ? path : "\(prefix)/\(path)"
+    }
+}
+
+public extension URL {
+    /// Nil if the size can't be read.
+    var fileSize: Int64? {
+        (try? resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
     }
 }
 

@@ -52,16 +52,6 @@ enum ImageMetrics {
         return length > 0 ? vector.map { $0 / length } : vector
     }
 
-    static func distance(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count else { return .infinity }
-        var sum: Float = 0
-        for i in a.indices {
-            let d = a[i] - b[i]
-            sum += d * d
-        }
-        return sum.squareRoot()
-    }
-
     private static func greyscale(_ image: CGImage, width: Int, height: Int) -> [UInt8]? {
         var pixels = [UInt8](repeating: 0, count: width * height)
         let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in

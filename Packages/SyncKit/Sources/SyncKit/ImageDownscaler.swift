@@ -52,7 +52,7 @@ public enum ImageDownscaler {
                   let height = properties[kCGImagePropertyPixelHeight] as? Int
             else { throw Failure.unreadable }
 
-            let bytes = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? .max
+            let bytes = source.fileSize ?? .max
             let longEdge = max(width, height)
             let location = location(from: properties)
             let name = UUID().uuidString
