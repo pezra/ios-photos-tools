@@ -43,7 +43,7 @@ enum BackupPaths {
                 return Array(zip(resources, rows(ids.compactMap { existing[$0] })))
             }
             var paths: [String]
-            if !existing.isEmpty, let extended = extending(existing, ids: ids, files: files, folder: folder) {
+            if !existing.isEmpty, let extended = BackupNaming.extending(ids.map { existing[$0] }, files: files, folder: folder) {
                 // A photo edited since its backup: the edit joins the files already there.
                 paths = extended
             } else {
@@ -71,18 +71,6 @@ enum BackupPaths {
         case .released: return true
         case let .resource(id): return !ownIDs.contains(id)
         }
-    }
-
-    /// The suffix the asset already uses, applied to all of its files.
-    private static func extending(_ existing: [String: String], ids: [String], files: [BackupFile], folder: String) -> [String]? {
-        for suffix in 0..<1000 {
-            let paths = BackupNaming.paths(for: files, folder: folder, suffix: suffix)
-            let matches = zip(ids, paths).allSatisfy { id, path in
-                existing[id].map { LibraryPath.normalized($0) == LibraryPath.normalized(path) } ?? true
-            }
-            if matches { return zip(ids, paths).map { existing[$0] ?? $1 } }
-        }
-        return nil
     }
 
     private static func resolve(resources: [PHAssetResource], files: [BackupFile], folder: String, ownIDs: Set<String>) async throws -> [String] {

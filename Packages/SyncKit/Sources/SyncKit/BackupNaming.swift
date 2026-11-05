@@ -76,6 +76,27 @@ public enum BackupNaming {
         }
     }
 
+    /// The paths for a photo that has gained files since its backup, or nil if they can't join the
+    /// ones already there. `existing` has the current path of each file, nil for the new ones.
+    ///
+    /// Files already there stay put. As in `resolve`, originals decide the suffix, since `editPath`
+    /// may have moved an edit along. New edits still need to go through `editPath`.
+    public static func extending(_ existing: [String?], files: [BackupFile], folder: String) -> [String]? {
+        guard zip(existing, files).contains(where: { $0 != nil && !$1.isEdit }) else { return nil }
+        for suffix in 0..<1000 {
+            let plain = paths(for: files, folder: folder, suffix: suffix)
+            let matches = files.indices.allSatisfy { index in
+                guard !files[index].isEdit, let path = existing[index] else { return true }
+                return LibraryPath.normalized(path) == LibraryPath.normalized(plain[index])
+            }
+            guard matches else { continue }
+            let result = zip(existing, plain).map { $0 ?? $1 }
+            // A new file can't share a path with one that has moved.
+            return Set(result.map(LibraryPath.normalized)).count == result.count ? result : nil
+        }
+        return nil
+    }
+
     /// An edit's path, moved along if something that isn't this photo's is already there, such as an
     /// `IMG_1234-edited.jpg` from a photo export. Edits replace their own file, so this is what keeps
     /// them from replacing anything else.

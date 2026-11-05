@@ -112,4 +112,40 @@ final class BackupNamingTests: XCTestCase {
             XCTAssertTrue(error is Unreachable)
         }
     }
+
+    private let heic = BackupFile(originalFilename: "IMG_1.HEIC", isEdit: false)
+    private let mov = BackupFile(originalFilename: "IMG_1.MOV", isEdit: false)
+    private let render = BackupFile(originalFilename: "FullSizeRender.jpg", isEdit: true)
+
+    func testNewFileJoinsAnEditThatMoved() {
+        let result = BackupNaming.extending(["2026/IMG_1.HEIC", "2026/IMG_1-edited-2.jpg", nil], files: [heic, render, mov], folder: "2026")
+        XCTAssertEqual(result, ["2026/IMG_1.HEIC", "2026/IMG_1-edited-2.jpg", "2026/IMG_1.MOV"])
+    }
+
+    func testNewEditTakesTheSuffixOfTheOriginals() {
+        let result = BackupNaming.extending(["2026/IMG_1 (1).HEIC", nil], files: [heic, render], folder: "2026")
+        XCTAssertEqual(result, ["2026/IMG_1 (1).HEIC", "2026/IMG_1 (1)-edited.jpg"])
+    }
+
+    func testExtendingKeepsTheSpellingAlreadyThere() {
+        let result = BackupNaming.extending(["2026/img_1.heic", nil], files: [heic, mov], folder: "2026")
+        XCTAssertEqual(result, ["2026/img_1.heic", "2026/IMG_1.MOV"])
+    }
+
+    func testOriginalsThatDontShareASuffixCantBeExtended() {
+        XCTAssertNil(BackupNaming.extending(["2026/IMG_1.HEIC", "2026/IMG_1 (1).MOV", nil], files: [heic, mov, render], folder: "2026"))
+    }
+
+    func testOriginalWithSomeOtherNameCantBeExtended() {
+        XCTAssertNil(BackupNaming.extending(["2026/other.HEIC", nil], files: [heic, mov], folder: "2026"))
+    }
+
+    func testOnlyAnEditThereIsNotEnoughToGoOn() {
+        XCTAssertNil(BackupNaming.extending([nil, "2026/IMG_1-edited.jpg"], files: [heic, render], folder: "2026"))
+    }
+
+    func testNewFileCantLandOnAMovedOne() {
+        let second = BackupFile(originalFilename: "Other.jpg", isEdit: true)
+        XCTAssertNil(BackupNaming.extending(["2026/IMG_1.HEIC", "2026/IMG_1-edited-2.jpg", nil], files: [heic, render, second], folder: "2026"))
+    }
 }
