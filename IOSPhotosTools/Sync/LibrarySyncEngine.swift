@@ -433,9 +433,7 @@ private struct Sources: Sendable {
     static func open() -> Sources {
         var bucket: Bucket?
         if let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3) {
-            let config = URLSessionConfiguration.default
-            config.allowsCellularAccess = settings.allowCellular
-            bucket = Bucket(client: client, prefix: settings.prefix, session: URLSession(configuration: config))
+            bucket = Bucket(client: client, prefix: settings.prefix, session: settings.bucketSession())
         }
         let drive = DriveDestination.id.flatMap { id in DriveDestination.open().map { Drive(root: $0, id: id) } }
         return Sources(drive: drive, bucket: bucket)

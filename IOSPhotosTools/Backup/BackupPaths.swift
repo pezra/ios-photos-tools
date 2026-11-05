@@ -115,14 +115,16 @@ enum BackupPaths {
     }
 
     /// Reads whichever copy can be reached.
-    private static func sha256(ofExisting entries: [InventoryEntry], path: String) async throws -> String {
+    static func sha256(ofExisting entries: [InventoryEntry], path: String) async throws -> String {
         if let entry = entries.first(where: { $0.source == .drive }), let root = DriveDestination.open() {
             defer { DriveDestination.close(root) }
             if let hash = try? Staging.sha256(of: root.appending(path: entry.path)) { return hash }
         }
         if let entry = entries.first(where: { $0.source == .s3 }), let settings = SettingsStore.snapshot(),
            let client = try? S3Client(config: settings.s3) {
-            let file = try await client.downloadObject(key: LibraryPath.key(prefix: settings.prefix, path: entry.path))
+            let session = settings.bucketSession()
+            defer { session.finishTasksAndInvalidate() }
+            let file = try await client.downloadObject(key: LibraryPath.key(prefix: settings.prefix, path: entry.path), session: session)
             defer { try? FileManager.default.removeItem(at: file) }
             return try Staging.sha256(of: file)
         }

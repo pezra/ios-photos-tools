@@ -139,7 +139,9 @@ actor DriveBackupEngine {
         guard let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3),
               !StorageInventory.hasListedS3(client: client, prefix: settings.prefix)
         else { return }
-        try await StorageInventory.prepareS3(client: client, prefix: settings.prefix)
+        let session = settings.bucketSession()
+        defer { session.finishTasksAndInvalidate() }
+        try await StorageInventory.prepareS3(client: client, prefix: settings.prefix, session: session)
     }
 
     /// Whether the file at `existing` has the same contents as `resource`.

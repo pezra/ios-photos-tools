@@ -64,6 +64,9 @@ actor BackupEngine {
             return
         }
 
+        let session = settings.bucketSession()
+        defer { session.finishTasksAndInvalidate() }
+
         await report(phase: "Checking library…", running: true)
         await reconcileWithUploadSession()
 
@@ -75,7 +78,10 @@ actor BackupEngine {
         // listing nothing can safely be uploaded.
         if !pending.isEmpty {
             do {
-                try await StorageInventory.prepareS3(client: client, prefix: settings.prefix)
+                try await StorageInventory.prepareS3(client: client, prefix: settings.prefix, session: session)
+            } catch let error as URLError where error.networkUnavailableReason == .cellular {
+                await report(phase: "Waiting for Wi-Fi", running: false)
+                return
             } catch {
                 await report(phase: "Couldn't list the bucket", running: false,
                              error: "Backup needs s3:ListBucket and s3:GetObject as well as s3:PutObject. \(error.localizedDescription)")
@@ -93,7 +99,7 @@ actor BackupEngine {
                 namingFailures += 1
                 namingError = error.localizedDescription
             }
-            await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: false)
+            await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: false, session: session)
         }
 
         if !Task.isCancelled {
@@ -106,7 +112,7 @@ actor BackupEngine {
                 return await performPass(isRetry: true)
             }
         }
-        await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: true)
+        await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: true, session: session)
 
         let failed = store.count(.failed) + namingFailures
         let phase = Task.isCancelled ? "Paused" : failed > 0 ? "Finished with \(failed) failed files" : "Up to date"
@@ -168,7 +174,7 @@ actor BackupEngine {
                 if let size = file.fileSize, size != inBucket.size {
                     matches = false
                 } else {
-                    matches = (try? await bucketHash(of: inBucket, client: client, settings: settings)).map { $0 == sha256 }
+                    matches = (try? await BackupPaths.sha256(ofExisting: [inBucket], path: row.path)).map { $0 == sha256 }
                 }
                 if matches == true {
                     Staging.remove(stagedName)
@@ -203,16 +209,6 @@ actor BackupEngine {
         store.markAssetCompleteIfFinished(assetID)
         await MainActor.run { BackupStatus.shared.refreshCounts() }
         return nil
-    }
-
-    private func bucketHash(of entry: InventoryEntry, client: S3Client, settings: SettingsStore.Snapshot) async throws -> String {
-        let config = URLSessionConfiguration.default
-        config.allowsCellularAccess = settings.allowCellular
-        let session = URLSession(configuration: config)
-        defer { session.finishTasksAndInvalidate() }
-        let file = try await client.downloadObject(key: LibraryPath.key(prefix: settings.prefix, path: entry.path), session: session)
-        defer { try? FileManager.default.removeItem(at: file) }
-        return try Staging.sha256(of: file)
     }
 
     private func waitForUploadSlot() async {

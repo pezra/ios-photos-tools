@@ -146,3 +146,12 @@ final class SettingsStore {
         ])
     }
 }
+
+extension SettingsStore.Snapshot {
+    /// For talking to the bucket, following the setting for cellular data. Invalidate it when done.
+    func bucketSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.allowsCellularAccess = allowCellular
+        return URLSession(configuration: config)
+    }
+}

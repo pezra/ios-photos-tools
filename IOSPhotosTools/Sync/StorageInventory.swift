@@ -81,7 +81,7 @@ enum StorageInventory {
     // MARK: - Bucket
 
     /// Brings the record of handled paths and the listing of the bucket up to date.
-    static func prepareS3(client: S3Client, prefix: String, session: URLSession = .shared) async throws {
+    static func prepareS3(client: S3Client, prefix: String, session: URLSession) async throws {
         // What's been checked in one bucket says nothing about another.
         let current = identity(client: client, prefix: prefix)
         let previous = store.meta("current-bucket")
@@ -121,7 +121,7 @@ enum StorageInventory {
         store.setMeta(key, "1")
     }
 
-    static func writeHandledPaths(toS3 client: S3Client, prefix: String, force: Bool, session: URLSession = .shared) async {
+    static func writeHandledPaths(toS3 client: S3Client, prefix: String, force: Bool, session: URLSession) async {
         let id = identity(client: client, prefix: prefix)
         guard store.meta("merged-s3-\(id)") != nil else { return }
         let key = "written-s3-\(id)"
