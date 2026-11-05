@@ -21,8 +21,13 @@ public struct InventoryEntry: Sendable, Equatable {
 /// A picture to copy to the phone, and where it can be read from.
 public struct ImportCandidate: Sendable, Equatable {
     public var path: String
-    public var onDrive: Bool
-    public var onS3: Bool
+    /// The exact spelling in each place it can be read from, since the two can differ and bucket
+    /// keys are case-sensitive.
+    public var drivePath: String?
+    public var s3Path: String?
+
+    public var onDrive: Bool { drivePath != nil }
+    public var onS3: Bool { s3Path != nil }
 }
 
 public enum ImportPlanner {
@@ -40,10 +45,10 @@ public enum ImportPlanner {
         for entry in entries where LibraryPath.isImportable(entry.path) {
             let key = LibraryPath.normalized(entry.path)
             guard !handled.contains(key) else { continue }
-            var candidate = byPath[key] ?? ImportCandidate(path: entry.path, onDrive: false, onS3: false)
+            var candidate = byPath[key] ?? ImportCandidate(path: entry.path)
             switch entry.source {
-            case .drive: candidate.onDrive = true
-            case .s3: candidate.onS3 = true
+            case .drive: candidate.drivePath = entry.path
+            case .s3: candidate.s3Path = entry.path
             }
             byPath[key] = candidate
         }

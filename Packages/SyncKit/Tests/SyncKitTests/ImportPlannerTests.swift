@@ -15,6 +15,23 @@ final class ImportPlannerTests: XCTestCase {
         XCTAssertTrue(result[0].onS3)
     }
 
+    func testKeepsTheExactSpellingInEachPlace() {
+        for entries in [[entry(.drive, "2007/IMG_1.JPG"), entry(.s3, "2007/img_1.jpg")],
+                        [entry(.s3, "2007/img_1.jpg"), entry(.drive, "2007/IMG_1.JPG")]] {
+            let result = ImportPlanner.candidates(from: entries, handled: [], importedTags: [])
+            XCTAssertEqual(result.first?.drivePath, "2007/IMG_1.JPG")
+            XCTAssertEqual(result.first?.s3Path, "2007/img_1.jpg")
+        }
+    }
+
+    func testSpellingOnlyInOnePlace() {
+        let result = ImportPlanner.candidates(from: [entry(.s3, "2007/img_1.jpg")], handled: [], importedTags: [])
+        XCTAssertNil(result.first?.drivePath)
+        XCTAssertEqual(result.first?.s3Path, "2007/img_1.jpg")
+        XCTAssertFalse(result[0].onDrive)
+        XCTAssertTrue(result[0].onS3)
+    }
+
     func testSameNameInDifferentFoldersStaysSeparate() {
         let result = ImportPlanner.candidates(
             from: [entry(.drive, "2007/IMG_1.JPG"), entry(.drive, "2008/IMG_1.JPG")],

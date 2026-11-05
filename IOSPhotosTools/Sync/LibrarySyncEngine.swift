@@ -276,12 +276,12 @@ actor LibrarySyncEngine {
 
     private static func prepareOne(_ item: ImportCandidate, drive: URL?, bucket: Bucket?, workspace: URL) async throws -> Prepared {
         try Task.checkCancellation()
-        if let drive, item.onDrive {
-            let output = try ImageDownscaler.process(source: drive.appending(path: item.path), into: workspace)
+        if let drive, let drivePath = item.drivePath {
+            let output = try ImageDownscaler.process(source: drive.appending(path: drivePath), into: workspace)
             return Prepared(path: item.path, output: output)
         }
-        guard let bucket else { throw CocoaError(.fileNoSuchFile) }
-        let download = try await bucket.client.downloadObject(key: LibraryPath.key(prefix: bucket.prefix, path: item.path), session: bucket.session)
+        guard let bucket, let s3Path = item.s3Path else { throw CocoaError(.fileNoSuchFile) }
+        let download = try await bucket.client.downloadObject(key: LibraryPath.key(prefix: bucket.prefix, path: s3Path), session: bucket.session)
         // ImageIO goes by contents, but the extension is used for a file passed through unchanged.
         let named = workspace.appendingPathComponent(UUID().uuidString).appendingPathExtension((item.path as NSString).pathExtension)
         defer {
