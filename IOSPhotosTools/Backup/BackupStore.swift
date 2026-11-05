@@ -67,7 +67,8 @@ final class BackupStore: @unchecked Sendable {
                 last_error TEXT,
                 updated_at REAL NOT NULL,
                 sha256 TEXT,
-                asset_modified_at REAL
+                asset_modified_at REAL,
+                superseded INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS resources_asset ON resources(asset_id);
             CREATE INDEX IF NOT EXISTS resources_state ON resources(state);
@@ -111,6 +112,7 @@ final class BackupStore: @unchecked Sendable {
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN sha256 TEXT", nil, nil, nil)
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN asset_modified_at REAL", nil, nil, nil)
         sqlite3_exec(db, "ALTER TABLE handled_paths ADD COLUMN on_bucket INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
+        sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
         migrateToLibraryLayout()
         recordWhatIsInBucket()
     }
@@ -204,13 +206,14 @@ final class BackupStore: @unchecked Sendable {
 
     func markUploading(_ id: String, stagedName: String, sha256: String?) {
         locked {
-            execute("UPDATE resources SET state = ?, staged_name = ?, sha256 = ?, updated_at = ? WHERE id = ?",
+            execute("UPDATE resources SET state = ?, staged_name = ?, sha256 = ?, superseded = 0, updated_at = ? WHERE id = ?",
                     [ResourceState.uploading.rawValue, stagedName, sha256, now, id])
         }
     }
 
     func markDone(_ id: String) {
         locked {
+            guard !resetSuperseded(id) else { return }
             execute("UPDATE resources SET state = ?, staged_name = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
                     [ResourceState.done.rawValue, now, id])
             execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id = ? AND on_bucket = 0", [id])
@@ -231,9 +234,15 @@ final class BackupStore: @unchecked Sendable {
 
     func resetToPending(_ id: String) {
         locked {
-            execute("UPDATE resources SET state = ?, staged_name = NULL, updated_at = ? WHERE id = ?",
+            execute("UPDATE resources SET state = ?, staged_name = NULL, superseded = 0, updated_at = ? WHERE id = ?",
                     [ResourceState.pending.rawValue, now, id])
         }
+    }
+
+    /// For an upload that has finished: if it was going to a path its photo has since lost, puts
+    /// it back to be sent to the new one, and returns true. How it finished doesn't matter then.
+    func resetIfSuperseded(_ id: String) -> Bool {
+        locked { resetSuperseded(id) }
     }
 
     /// For assets with nothing to upload.
@@ -353,6 +362,9 @@ final class BackupStore: @unchecked Sendable {
             // even if another of its files finishes uploading in the meantime.
             execute("UPDATE resources SET state = ?, staged_name = NULL WHERE asset_id = ? AND state != ?",
                     [ResourceState.pending.rawValue, assetID, ResourceState.uploading.rawValue])
+            // These can't be stopped, and are headed for the old paths.
+            execute("UPDATE resources SET superseded = 1 WHERE asset_id = ? AND state = ?",
+                    [assetID, ResourceState.uploading.rawValue])
             execute("DELETE FROM assets WHERE id = ?", [assetID])
             execute("DELETE FROM drive_assets WHERE asset_id = ?", [assetID])
             bumpHandledVersion()
@@ -576,6 +588,14 @@ final class BackupStore: @unchecked Sendable {
     // MARK: - SQLite helpers (call with lock held)
 
     private var now: Double { Date().timeIntervalSince1970 }
+
+    private func resetSuperseded(_ id: String) -> Bool {
+        let superseded = query("SELECT superseded FROM resources WHERE id = ?", [id]) { sqlite3_column_int($0, 0) != 0 }.first ?? false
+        guard superseded else { return false }
+        execute("UPDATE resources SET state = ?, staged_name = NULL, superseded = 0, updated_at = ? WHERE id = ?",
+                [ResourceState.pending.rawValue, now, id])
+        return true
+    }
 
     private func holder(ofPath path: String) -> PathHolder {
         let rows: [String?] = query("SELECT resource_id FROM handled_paths WHERE norm = ?", [LibraryPath.normalized(path)]) { text($0, 0) }

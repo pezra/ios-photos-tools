@@ -68,7 +68,10 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
         let stagedName = store.stagedName(forResource: resourceID)
         let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
 
-        if let error {
+        if store.resetIfSuperseded(resourceID) {
+            // Sent to a path its photo no longer has, so a Live Photo's files would end up under
+            // different names. It goes to the new path on the next pass.
+        } else if let error {
             store.markFailed(resourceID, error: error.localizedDescription)
         } else if (200..<300).contains(status) {
             store.markDone(resourceID)
