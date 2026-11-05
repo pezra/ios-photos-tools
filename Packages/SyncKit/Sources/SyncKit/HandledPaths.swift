@@ -14,12 +14,15 @@ public struct HandledPath: Codable, Sendable, Equatable {
     public var resourceID: String?
     /// For backups: the file is known to be on the drive, so it needn't be compared again.
     public var onDrive: Bool?
+    /// For backups: this photo's file is known to be in the bucket, so it needn't be compared again.
+    public var inBucket: Bool?
 
-    public init(path: String, kind: Kind, resourceID: String? = nil, onDrive: Bool? = nil) {
+    public init(path: String, kind: Kind, resourceID: String? = nil, onDrive: Bool? = nil, inBucket: Bool? = nil) {
         self.path = path
         self.kind = kind
         self.resourceID = resourceID
         self.onDrive = onDrive
+        self.inBucket = inBucket
     }
 }
 

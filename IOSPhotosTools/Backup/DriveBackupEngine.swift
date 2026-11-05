@@ -153,16 +153,6 @@ actor DriveBackupEngine {
         return try Staging.sha256(of: copy) == Staging.sha256(of: existing)
     }
 
-    enum CopyError: Error, LocalizedError {
-        case nameTaken(String)
-
-        var errorDescription: String? {
-            switch self {
-            case let .nameTaken(path): "A different picture is already at \(path). This photo will get a new name on the next pass."
-            }
-        }
-    }
-
     /// Copies the asset's files that aren't on the drive yet, plus its edited versions (which keep
     /// their name when re-edited). Returns the first error, if any.
     private func copy(_ asset: PHAsset, to root: URL, driveID: String) async -> Error? {
@@ -178,13 +168,15 @@ actor DriveBackupEngine {
             if Task.isCancelled { return nil }
             let destination = root.appending(path: row.path)
             let isEdit = PhotoLibrary.editedTypes.contains(resource.type)
-            if !isEdit && fm.fileExists(atPath: destination.path) {
-                if store.isOnDrive(row.path) { continue }
-                // Never overwrites: the path may have been chosen while the drive was away.
+            let isOwn = store.isOnDrive(row.path)
+            if fm.fileExists(atPath: destination.path) && isOwn && !isEdit { continue }
+            // Never overwrites: the path may have been chosen while the drive was away. Only an
+            // edit known to be this photo's own gets replaced.
+            if fm.fileExists(atPath: destination.path) && !isOwn {
                 do {
                     guard try await isSameFile(resource, existing: destination) else {
                         store.retirePaths(forAsset: asset.localIdentifier)
-                        return CopyError.nameTaken(row.path)
+                        return BackupPaths.Failure.nameTaken(row.path)
                     }
                     store.markOnDrive(row.path)
                 } catch {

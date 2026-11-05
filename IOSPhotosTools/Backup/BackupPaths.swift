@@ -8,11 +8,13 @@ enum BackupPaths {
     enum Failure: Error, LocalizedError {
         case stillContended
         case cannotCompare(String)
+        case nameTaken(String)
 
         var errorDescription: String? {
             switch self {
             case .stillContended: "Another photo keeps taking this photo's file name. It will be tried again."
             case let .cannotCompare(path): "\(path) already exists, but it can't be read to compare with this photo. It will be tried again."
+            case let .nameTaken(path): "A different picture is already at \(path). This photo will get a new name on the next pass."
             }
         }
     }

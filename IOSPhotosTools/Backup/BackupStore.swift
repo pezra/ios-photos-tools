@@ -84,7 +84,8 @@ final class BackupStore: @unchecked Sendable {
                 kind TEXT NOT NULL,
                 resource_id TEXT,
                 asset_id TEXT,
-                on_drive INTEGER NOT NULL DEFAULT 0
+                on_drive INTEGER NOT NULL DEFAULT 0,
+                on_bucket INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS handled_resource ON handled_paths(resource_id);
             CREATE INDEX IF NOT EXISTS handled_asset ON handled_paths(asset_id);
@@ -109,7 +110,9 @@ final class BackupStore: @unchecked Sendable {
         sqlite3_exec(db, "ALTER TABLE assets ADD COLUMN modified_at REAL", nil, nil, nil)
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN sha256 TEXT", nil, nil, nil)
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN asset_modified_at REAL", nil, nil, nil)
+        sqlite3_exec(db, "ALTER TABLE handled_paths ADD COLUMN on_bucket INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
         migrateToLibraryLayout()
+        recordWhatIsInBucket()
     }
 
     /// The layout changed from `<year>/<month>/<asset-uuid>/<file>` to the picture library's, so
@@ -123,6 +126,15 @@ final class BackupStore: @unchecked Sendable {
         execute("DELETE FROM drive_assets")
         DriveDestination.forget()
         sqlite3_exec(db, "PRAGMA user_version = 1", nil, nil, nil)
+    }
+
+    /// Files already uploaded from this phone are known to be in the bucket.
+    private func recordWhatIsInBucket() {
+        let version = query("PRAGMA user_version") { Int(sqlite3_column_int($0, 0)) }.first ?? 0
+        guard version < 2 else { return }
+        execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id IN (SELECT id FROM resources WHERE state = ?)",
+                [ResourceState.done.rawValue])
+        sqlite3_exec(db, "PRAGMA user_version = 2", nil, nil, nil)
     }
 
     // MARK: - Queries
@@ -201,6 +213,8 @@ final class BackupStore: @unchecked Sendable {
         locked {
             execute("UPDATE resources SET state = ?, staged_name = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
                     [ResourceState.done.rawValue, now, id])
+            execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id = ? AND on_bucket = 0", [id])
+            if sqlite3_changes(db) > 0 { bumpHandledVersion() }
             guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
             completeAssetIfFinished(assetID)
         }
@@ -239,6 +253,16 @@ final class BackupStore: @unchecked Sendable {
         locked {
             execute("DELETE FROM resources WHERE state != ?", [ResourceState.uploading.rawValue])
             execute("DELETE FROM assets")
+        }
+        forgetBucketContents()
+    }
+
+    /// Nothing is known to be in a new bucket yet, so a file found at a photo's path has to be
+    /// compared rather than assumed to be that photo.
+    func forgetBucketContents() {
+        locked {
+            execute("UPDATE handled_paths SET on_bucket = 0 WHERE on_bucket != 0")
+            bumpHandledVersion()
         }
     }
 
@@ -324,7 +348,7 @@ final class BackupStore: @unchecked Sendable {
     /// there, and those must not be imported as if they were someone else's pictures.
     func retirePaths(forAsset assetID: String) {
         locked {
-            execute("UPDATE handled_paths SET resource_id = NULL, asset_id = NULL, on_drive = 0 WHERE asset_id = ?", [assetID])
+            execute("UPDATE handled_paths SET resource_id = NULL, asset_id = NULL, on_drive = 0, on_bucket = 0 WHERE asset_id = ?", [assetID])
             // Kept as pending so the asset can't count as complete until these are backed up again,
             // even if another of its files finishes uploading in the meantime.
             execute("UPDATE resources SET state = ?, staged_name = NULL WHERE asset_id = ? AND state != ?",
@@ -349,6 +373,12 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
+    func isInBucket(_ path: String) -> Bool {
+        locked {
+            query("SELECT on_bucket FROM handled_paths WHERE norm = ?", [LibraryPath.normalized(path)]) { sqlite3_column_int($0, 0) != 0 }.first ?? false
+        }
+    }
+
     func markOnDrive(_ path: String) {
         locked {
             execute("UPDATE handled_paths SET on_drive = 1 WHERE norm = ? AND on_drive = 0", [LibraryPath.normalized(path)])
@@ -369,28 +399,32 @@ final class BackupStore: @unchecked Sendable {
 
     func handledEntries() -> [HandledPath] {
         locked {
-            query("SELECT path, kind, resource_id, on_drive FROM handled_paths") { stmt in
+            query("SELECT path, kind, resource_id, on_drive, on_bucket FROM handled_paths") { stmt in
                 HandledPath(
                     path: text(stmt, 0) ?? "",
                     kind: HandledPath.Kind(rawValue: text(stmt, 1) ?? "") ?? .backup,
                     resourceID: text(stmt, 2),
-                    onDrive: sqlite3_column_int(stmt, 3) != 0 ? true : nil
+                    onDrive: sqlite3_column_int(stmt, 3) != 0 ? true : nil,
+                    inBucket: sqlite3_column_int(stmt, 4) != 0 ? true : nil
                 )
             }
         }
     }
 
-    /// Adds entries read from storage. Paths already known keep what's known about them.
-    func mergeHandled(_ entries: [HandledPath]) {
+    /// Adds entries read from a file in `source`. Paths already known keep what's known about them.
+    /// A file only speaks for where it was found: the copy in the bucket says what's in that bucket,
+    /// not what's on whichever drive is plugged in now.
+    func mergeHandled(_ entries: [HandledPath], from source: StorageSource) {
         guard !entries.isEmpty else { return }
         locked {
             transaction {
                 for entry in entries {
                     let assetID = entry.resourceID.map(ResourceRow.assetID(ofResource:))
                     execute("""
-                        INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id, on_drive) VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(norm) DO UPDATE SET on_drive = MAX(on_drive, excluded.on_drive)
-                        """, [LibraryPath.normalized(entry.path), entry.path, entry.kind.rawValue, entry.resourceID, assetID, entry.onDrive == true ? 1 : 0])
+                        INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id, on_drive, on_bucket) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(norm) DO UPDATE SET on_drive = MAX(on_drive, excluded.on_drive), on_bucket = MAX(on_bucket, excluded.on_bucket)
+                        """, [LibraryPath.normalized(entry.path), entry.path, entry.kind.rawValue, entry.resourceID, assetID,
+                              source == .drive && entry.onDrive == true ? 1 : 0, source == .s3 && entry.inBucket == true ? 1 : 0])
                 }
             }
             bumpHandledVersion()

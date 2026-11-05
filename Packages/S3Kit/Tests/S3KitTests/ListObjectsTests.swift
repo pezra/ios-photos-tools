@@ -12,8 +12,8 @@ final class ListObjectsTests: XCTestCase {
         """.utf8)
     }
 
-    func testParsesObjectsAndSizes() {
-        let page = S3ListPage(xml: xml("""
+    func testParsesObjectsAndSizes() throws {
+        let page = try S3ListPage(xml: xml("""
             <IsTruncated>false</IsTruncated>
             <Contents><Key>photos/2007/023 (2).JPG</Key><LastModified>2026-01-01T00:00:00.000Z</LastModified><ETag>"abc"</ETag><Size>1234</Size><StorageClass>STANDARD</StorageClass></Contents>
             <Contents><Key>photos/undated/R&amp;D/a.jpg</Key><Size>5000000000</Size></Contents>
@@ -25,18 +25,33 @@ final class ListObjectsTests: XCTestCase {
         XCTAssertNil(page.nextContinuationToken)
     }
 
-    func testTruncatedPageGivesToken() {
-        let page = S3ListPage(xml: xml("""
+    func testTruncatedPageGivesToken() throws {
+        let page = try S3ListPage(xml: xml("""
             <IsTruncated>true</IsTruncated><NextContinuationToken>1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=</NextContinuationToken>
             <Contents><Key>a</Key><Size>1</Size></Contents>
             """))
         XCTAssertEqual(page.nextContinuationToken, "1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=")
     }
 
-    func testEmptyListing() {
-        let page = S3ListPage(xml: xml("<IsTruncated>false</IsTruncated>"))
+    func testEmptyListing() throws {
+        let page = try S3ListPage(xml: xml("<IsTruncated>false</IsTruncated>"))
         XCTAssertTrue(page.objects.isEmpty)
         XCTAssertNil(page.nextContinuationToken)
+    }
+
+    func testCutOffListingIsAnError() {
+        let whole = String(decoding: xml("<Contents><Key>a</Key><Size>1</Size></Contents>"), as: UTF8.self)
+        let cutOff = Data(whole.prefix(whole.count - 30).utf8)
+        XCTAssertThrowsError(try S3ListPage(xml: cutOff))
+    }
+
+    func testResponseThatIsNotAListingIsAnError() {
+        XCTAssertThrowsError(try S3ListPage(xml: Data("<html><body>Sign in to the wifi</body></html>".utf8)))
+        XCTAssertThrowsError(try S3ListPage(xml: Data()))
+    }
+
+    func testTruncatedPageWithNoTokenIsAnError() {
+        XCTAssertThrowsError(try S3ListPage(xml: xml("<IsTruncated>true</IsTruncated>")))
     }
 
     func testListRequestIsSignedOverTheQuery() throws {

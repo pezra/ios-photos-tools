@@ -53,7 +53,7 @@ final class HandledPathsTests: XCTestCase {
     func testRoundTrip() {
         let entries = [
             HandledPath(path: "2007/a.jpg", kind: .import),
-            HandledPath(path: "2026/b.HEIC", kind: .backup, resourceID: "X/L0/001#1#b.HEIC", onDrive: true),
+            HandledPath(path: "2026/b.HEIC", kind: .backup, resourceID: "X/L0/001#1#b.HEIC", onDrive: true, inBucket: true),
         ]
         XCTAssertEqual(HandledPathsFile.decode(HandledPathsFile.encode(entries)), entries)
     }

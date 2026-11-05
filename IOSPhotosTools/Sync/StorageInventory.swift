@@ -45,7 +45,7 @@ enum StorageInventory {
         guard store.meta(key) == nil else { return }
         let file = root.appending(path: HandledPathsFile.relativePath)
         if FileManager.default.fileExists(atPath: file.path) {
-            store.mergeHandled(HandledPathsFile.decode(try Data(contentsOf: file)))
+            store.mergeHandled(HandledPathsFile.decode(try Data(contentsOf: file)), from: .drive)
         }
         store.setMeta(key, "1")
     }
@@ -74,6 +74,13 @@ enum StorageInventory {
 
     /// Brings the record of handled paths and the listing of the bucket up to date.
     static func prepareS3(client: S3Client, prefix: String, session: URLSession = .shared) async throws {
+        // What's been checked in one bucket says nothing about another.
+        let current = identity(client: client, prefix: prefix)
+        let previous = store.meta("current-bucket")
+        if previous != current {
+            if previous != nil { store.forgetBucketContents() }
+            store.setMeta("current-bucket", current)
+        }
         try await mergeHandledPaths(fromS3: client, prefix: prefix, session: session)
         try await refreshS3(client: client, prefix: prefix, session: session)
     }
@@ -99,7 +106,7 @@ enum StorageInventory {
         guard store.meta(key) == nil else { return }
         do {
             let data = try await client.getObject(key: handledKey(prefix: prefix), session: session)
-            store.mergeHandled(HandledPathsFile.decode(data))
+            store.mergeHandled(HandledPathsFile.decode(data), from: .s3)
         } catch let error as S3Error where error.status == 404 {
             // Nothing there yet.
         }

@@ -22,12 +22,15 @@ public struct S3Config: Sendable, Equatable {
 
 public enum S3Error: Error, LocalizedError, Equatable {
     case invalidEndpoint
+    case malformedListing
     case http(status: Int, code: String?, message: String?)
 
     public var errorDescription: String? {
         switch self {
         case .invalidEndpoint:
             return "The endpoint must be a full URL such as https://s3.us-east-1.amazonaws.com"
+        case .malformedListing:
+            return "The service's list of files couldn't be read."
         case let .http(status, code, message):
             return ["HTTP \(status)", code, message].compactMap { $0 }.joined(separator: ": ")
         }
@@ -66,11 +69,14 @@ struct S3ListPage {
     private(set) var objects: [S3Object] = []
     private(set) var nextContinuationToken: String?
 
-    init(xml: Data) {
+    /// Throws unless this is a whole listing, since a partial one would make files look missing.
+    init(xml: Data) throws {
         let delegate = Delegate()
         let parser = XMLParser(data: xml)
         parser.delegate = delegate
-        parser.parse()
+        guard parser.parse(), delegate.isListing, !delegate.isTruncated || delegate.nextToken != nil else {
+            throw S3Error.malformedListing
+        }
         objects = delegate.objects
         // Only a truncated listing has more pages.
         nextContinuationToken = delegate.isTruncated ? delegate.nextToken : nil
@@ -78,6 +84,7 @@ struct S3ListPage {
 
     private final class Delegate: NSObject, XMLParserDelegate {
         var objects: [S3Object] = []
+        var isListing = false
         var isTruncated = false
         var nextToken: String?
         private var text = ""
@@ -86,6 +93,7 @@ struct S3ListPage {
 
         func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String] = [:]) {
             text = ""
+            if name == "ListBucketResult" { isListing = true }
             if name == "Contents" {
                 key = nil
                 size = nil
@@ -210,7 +218,7 @@ public struct S3Client: Sendable {
             if let token { query.append(("continuation-token", token)) }
             let request = signedRequest(method: "GET", key: nil, query: query, payloadHash: SigV4.sha256Hex(Data()))
             let (body, response) = try await session.data(for: request)
-            let page = S3ListPage(xml: try checked(body, response))
+            let page = try S3ListPage(xml: try checked(body, response))
             objects += page.objects
             token = page.nextContinuationToken
         } while token != nil

@@ -137,9 +137,12 @@ actor BackupEngine {
             // is re-exported and compared by content.
             let isEdit = PhotoLibrary.editedTypes.contains(resource.type)
             if previous?.state == .done && !isEdit { continue }
-            // Already at its own path in the bucket, as when reinstalling loses the upload history.
             let inBucket = store.inventoryEntries(for: row.path).first { $0.source == .s3 }
-            if previous?.state != .done && !isEdit && inBucket != nil {
+            // Having a path doesn't mean what's there is this photo's: it may have been chosen on
+            // a pass to the drive, or before switching buckets.
+            let isOwn = previous?.state == .done || store.isInBucket(row.path)
+            // Already at its own path in the bucket, as when reinstalling loses the upload history.
+            if isOwn && !isEdit && inBucket != nil {
                 store.markDone(row.id)
                 continue
             }
@@ -149,7 +152,7 @@ actor BackupEngine {
             let sha256: String?
             do {
                 try await PhotoLibrary.export(resource, to: file)
-                sha256 = isEdit ? try Staging.sha256(of: file) : nil
+                sha256 = isEdit || inBucket != nil ? try Staging.sha256(of: file) : nil
             } catch {
                 Staging.remove(stagedName)
                 store.markFailed(row.id, error: "Couldn't read from photo library: \(error.localizedDescription)")
@@ -159,13 +162,30 @@ actor BackupEngine {
                 Staging.remove(stagedName)
                 continue
             }
-            // An edit of the same size can still be a different edit. If the comparison fails, it's
-            // uploaded, which is safe because this path is its own.
-            if previous?.state != .done, let inBucket, let sha256, file.fileSize == inBucket.size,
-               (try? await bucketHash(of: inBucket, client: client, settings: settings)) == sha256 {
-                Staging.remove(stagedName)
-                store.markDone(row.id, sha256: sha256)
-                continue
+            if previous?.state != .done, let inBucket, let sha256 {
+                let matches: Bool?
+                if let size = file.fileSize, size != inBucket.size {
+                    matches = false
+                } else {
+                    matches = (try? await bucketHash(of: inBucket, client: client, settings: settings)).map { $0 == sha256 }
+                }
+                if matches == true {
+                    Staging.remove(stagedName)
+                    store.markDone(row.id, sha256: sha256)
+                    continue
+                }
+                // Unless it's this photo's own older edit, which gets replaced, nothing is sent:
+                // a different picture gets to keep the name.
+                if !isOwn {
+                    Staging.remove(stagedName)
+                    if Task.isCancelled { return nil }
+                    guard matches != nil else {
+                        store.markFailed(row.id, error: BackupPaths.Failure.cannotCompare(row.path).localizedDescription)
+                        continue
+                    }
+                    store.retirePaths(forAsset: assetID)
+                    return BackupPaths.Failure.nameTaken(row.path)
+                }
             }
             let url = client.presignedURL(method: "PUT", key: row.s3Key, expiresIn: urlLifetime)
             store.markUploading(row.id, stagedName: stagedName, sha256: sha256)
@@ -175,7 +195,7 @@ actor BackupEngine {
                 contentType: PhotoLibrary.contentType(of: resource),
                 resourceID: row.id,
                 allowCellular: settings.allowCellular,
-                mustNotExist: !isEdit
+                mustNotExist: !isEdit || !isOwn
             )
         }
         // Records the new modification date when nothing needed uploading.
