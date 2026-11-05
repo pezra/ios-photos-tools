@@ -1,5 +1,6 @@
 import Photos
 import SwiftUI
+import SyncKit
 
 struct ContentView: View {
     @Environment(BackupStatus.self) private var status

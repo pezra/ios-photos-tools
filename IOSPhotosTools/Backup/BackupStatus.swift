@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import Photos
+import SyncKit
 
 /// What the UI shows about cloud backup progress, and how much of the library is backed up where.
 @MainActor

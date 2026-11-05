@@ -1,8 +1,7 @@
 import Foundation
 import SQLite3
-import SyncKit
 
-enum ResourceState: Int {
+public enum ResourceState: Int, Sendable {
     case pending = 0
     case uploading = 1
     case done = 2
@@ -10,22 +9,29 @@ enum ResourceState: Int {
 }
 
 /// One file (photo, video, Live Photo movie, edited render, …) belonging to a library asset.
-struct ResourceRow {
-    let id: String
-    let assetID: String
+public struct ResourceRow: Sendable {
+    public let id: String
+    public let assetID: String
     /// Where the file goes in the library, e.g. `2026/IMG_1234.HEIC`.
-    let path: String
+    public let path: String
     /// `path` under the bucket's folder.
-    let s3Key: String
+    public let s3Key: String
+
+    public init(id: String, assetID: String, path: String, s3Key: String) {
+        self.id = id
+        self.assetID = assetID
+        self.path = path
+        self.s3Key = s3Key
+    }
 
     /// Resource IDs start with the asset's identifier.
-    static func assetID(ofResource id: String) -> String {
+    public static func assetID(ofResource id: String) -> String {
         id.split(separator: "#").first.map(String.init) ?? id
     }
 }
 
 /// Who a library path belongs to.
-enum PathHolder {
+public enum PathHolder: Sendable, Equatable {
     case free
     /// Handled, but not by a resource: an imported or retired path.
     case released
@@ -35,9 +41,7 @@ enum PathHolder {
 /// Persistent record of what has been backed up, in a small SQLite database.
 ///
 /// An asset is complete once every one of its resources has uploaded. Safe to call from any thread.
-final class BackupStore: @unchecked Sendable {
-    static let shared = BackupStore()
-
+public final class BackupStore: @unchecked Sendable {
     private var db: OpaquePointer?
     private let lock = NSLock()
     private var libraryLoaded = false
@@ -45,10 +49,9 @@ final class BackupStore: @unchecked Sendable {
     private var statementFailed = false
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    private init() {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let path = dir.appendingPathComponent("backup.sqlite").path
+    /// `onLayoutChange` runs if opening this database moves it to a new layout, which everything
+    /// is backed up again for.
+    public init(path: String, onLayoutChange: () -> Void) {
         guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
             fatalError("Could not open backup database at \(path)")
         }
@@ -115,20 +118,19 @@ final class BackupStore: @unchecked Sendable {
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN asset_modified_at REAL", nil, nil, nil)
         sqlite3_exec(db, "ALTER TABLE handled_paths ADD COLUMN on_bucket INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
-        migrateToLibraryLayout()
+        migrateToLibraryLayout(onLayoutChange)
         recordWhatIsInBucket()
     }
 
     /// The layout changed from `<year>/<month>/<asset-uuid>/<file>` to the picture library's, so
-    /// everything is backed up again. The drive folder is forgotten so that doesn't go into the old
-    /// folder: the user chooses the library's folder.
-    private func migrateToLibraryLayout() {
+    /// everything is backed up again.
+    private func migrateToLibraryLayout(_ onLayoutChange: () -> Void) {
         let version = query("PRAGMA user_version") { Int(sqlite3_column_int($0, 0)) }.first ?? 0
         guard version < 1 else { return }
         execute("DELETE FROM resources")
         execute("DELETE FROM assets")
         execute("DELETE FROM drive_assets")
-        DriveDestination.forget()
+        onLayoutChange()
         sqlite3_exec(db, "PRAGMA user_version = 1", nil, nil, nil)
     }
 
@@ -145,7 +147,7 @@ final class BackupStore: @unchecked Sendable {
 
     /// Completed assets mapped to the asset modification date they were backed up at
     /// (nil if unknown, which forces a recheck).
-    func completedAssets() -> [String: Double?] {
+    public func completedAssets() -> [String: Double?] {
         locked {
             let rows = query("SELECT id, modified_at FROM assets") { stmt -> (String, Double?) in
                 let modified = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
@@ -155,14 +157,14 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func count(_ state: ResourceState) -> Int {
+    public func count(_ state: ResourceState) -> Int {
         locked {
             query("SELECT COUNT(*) FROM resources WHERE state = ?", [state.rawValue]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
         }
     }
 
     /// State and content hash of the last upload, by resource ID.
-    func resources(forAsset assetID: String) -> [String: (state: ResourceState, sha256: String?)] {
+    public func resources(forAsset assetID: String) -> [String: (state: ResourceState, sha256: String?)] {
         locked {
             let rows = query("SELECT id, state, sha256 FROM resources WHERE asset_id = ?", [assetID]) {
                 (text($0, 0) ?? "", (ResourceState(rawValue: Int(sqlite3_column_int($0, 1))) ?? .pending, text($0, 2)))
@@ -171,7 +173,7 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func uploadingResources() -> [(id: String, stagedName: String?)] {
+    public func uploadingResources() -> [(id: String, stagedName: String?)] {
         locked {
             query("SELECT id, staged_name FROM resources WHERE state = ?", [ResourceState.uploading.rawValue]) {
                 (id: text($0, 0) ?? "", stagedName: text($0, 1))
@@ -179,11 +181,11 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func stagedName(forResource id: String) -> String? {
+    public func stagedName(forResource id: String) -> String? {
         locked { query("SELECT staged_name FROM resources WHERE id = ?", [id]) { text($0, 0) }.first ?? nil }
     }
 
-    func lastError() -> String? {
+    public func lastError() -> String? {
         locked {
             query("SELECT last_error FROM resources WHERE state = ? ORDER BY updated_at DESC LIMIT 1",
                   [ResourceState.failed.rawValue]) { text($0, 0) }.first ?? nil
@@ -194,7 +196,7 @@ final class BackupStore: @unchecked Sendable {
 
     /// Records resources for an asset at its current modification date; keys of not-yet-uploaded
     /// resources are refreshed.
-    func register(_ rows: [ResourceRow], assetID: String, assetModifiedAt: Double?) {
+    public func register(_ rows: [ResourceRow], assetID: String, assetModifiedAt: Double?) {
         locked {
             for row in rows {
                 execute("""
@@ -206,14 +208,14 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func markUploading(_ id: String, stagedName: String, sha256: String?) {
+    public func markUploading(_ id: String, stagedName: String, sha256: String?) {
         locked {
             execute("UPDATE resources SET state = ?, staged_name = ?, sha256 = ?, superseded = 0, updated_at = ? WHERE id = ?",
                     [ResourceState.uploading.rawValue, stagedName, sha256, now, id])
         }
     }
 
-    func markDone(_ id: String) {
+    public func markDone(_ id: String) {
         locked {
             guard !resetSuperseded(id) else { return }
             execute("UPDATE resources SET state = ?, staged_name = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
@@ -225,7 +227,7 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func markFailed(_ id: String, error: String) {
+    public func markFailed(_ id: String, error: String) {
         locked {
             execute("""
                 UPDATE resources SET state = ?, staged_name = NULL, attempts = attempts + 1, last_error = ?, updated_at = ?
@@ -234,7 +236,7 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func resetToPending(_ id: String) {
+    public func resetToPending(_ id: String) {
         locked {
             execute("UPDATE resources SET state = ?, staged_name = NULL, superseded = 0, updated_at = ? WHERE id = ?",
                     [ResourceState.pending.rawValue, now, id])
@@ -243,12 +245,12 @@ final class BackupStore: @unchecked Sendable {
 
     /// For an upload that has finished: if it was going to a path its photo has since lost, puts
     /// it back to be sent to the new one, and returns true. How it finished doesn't matter then.
-    func resetIfSuperseded(_ id: String) -> Bool {
+    public func resetIfSuperseded(_ id: String) -> Bool {
         locked { resetSuperseded(id) }
     }
 
     /// For assets with nothing to upload.
-    func markAssetComplete(_ assetID: String, modifiedAt: Double?) {
+    public func markAssetComplete(_ assetID: String, modifiedAt: Double?) {
         locked {
             execute("INSERT OR REPLACE INTO assets (id, completed_at, modified_at) VALUES (?, ?, ?)", [assetID, now, modifiedAt])
         }
@@ -256,7 +258,7 @@ final class BackupStore: @unchecked Sendable {
 
     /// Forgets files an asset no longer has, such as an edit reverted before it could upload, which
     /// would otherwise keep the asset from ever being complete. Files that did upload stay on record.
-    func forgetMissingResources(forAsset assetID: String, keeping ids: [String]) {
+    public func forgetMissingResources(forAsset assetID: String, keeping ids: [String]) {
         let marks = Array(repeating: "?", count: ids.count).joined(separator: ", ")
         let args: [Any?] = [assetID, ResourceState.pending.rawValue, ResourceState.failed.rawValue] + ids
         locked { execute("DELETE FROM resources WHERE asset_id = ? AND state IN (?, ?) AND id NOT IN (\(marks))", args) }
@@ -264,7 +266,7 @@ final class BackupStore: @unchecked Sendable {
 
     /// Forgets files still waiting to upload whose photos have left the library (as listed by
     /// `setLibraryAssets`), which would otherwise count as failed on every pass.
-    func forgetResourcesOfMissingAssets() {
+    public func forgetResourcesOfMissingAssets() {
         locked {
             execute("DELETE FROM resources WHERE state IN (?, ?) AND asset_id NOT IN (SELECT id FROM library)",
                     [ResourceState.pending.rawValue, ResourceState.failed.rawValue])
@@ -272,12 +274,12 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// Marks the asset complete if every one of its resources has uploaded.
-    func markAssetCompleteIfFinished(_ assetID: String) {
+    public func markAssetCompleteIfFinished(_ assetID: String) {
         locked { completeAssetIfFinished(assetID) }
     }
 
     /// Forgets all history so everything is uploaded again (e.g. after switching buckets).
-    func reset() {
+    public func reset() {
         locked {
             execute("DELETE FROM resources WHERE state != ?", [ResourceState.uploading.rawValue])
             execute("DELETE FROM assets")
@@ -287,7 +289,7 @@ final class BackupStore: @unchecked Sendable {
 
     /// Nothing is known to be in a new bucket yet, so a file found at a photo's path has to be
     /// compared rather than assumed to be that photo.
-    func forgetBucketContents() {
+    public func forgetBucketContents() {
         locked {
             execute("UPDATE handled_paths SET on_bucket = 0 WHERE on_bucket != 0")
             bumpHandledVersion()
@@ -297,7 +299,7 @@ final class BackupStore: @unchecked Sendable {
     // MARK: - USB drive copies
 
     /// Assets copied to the drive, mapped to the asset modification date they were copied at.
-    func completedDriveAssets(driveID: String) -> [String: Double?] {
+    public func completedDriveAssets(driveID: String) -> [String: Double?] {
         locked {
             let rows = query("SELECT asset_id, modified_at FROM drive_assets WHERE drive_id = ?", [driveID]) { stmt -> (String, Double?) in
                 let modified = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
@@ -307,7 +309,7 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func markDriveAssetComplete(_ assetID: String, driveID: String, modifiedAt: Double?) {
+    public func markDriveAssetComplete(_ assetID: String, driveID: String, modifiedAt: Double?) {
         locked {
             execute("INSERT OR REPLACE INTO drive_assets (drive_id, asset_id, completed_at, modified_at) VALUES (?, ?, ?, ?)",
                     [driveID, assetID, now, modifiedAt])
@@ -315,13 +317,13 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// Forgets what was copied to drives other than `driveID` (all drives if nil).
-    func forgetDrives(except driveID: String?) {
+    public func forgetDrives(except driveID: String?) {
         locked { execute("DELETE FROM drive_assets WHERE drive_id IS NOT ?", [driveID]) }
     }
 
     /// After changing folders: nothing is known to be in the new one yet, so a file found at a
     /// photo's path has to be compared rather than assumed to be that photo.
-    func forgetDriveContents() {
+    public func forgetDriveContents() {
         locked {
             execute("UPDATE handled_paths SET on_drive = 0 WHERE on_drive != 0")
             execute("DELETE FROM remote_files WHERE source = ?", [StorageSource.drive.rawValue])
@@ -332,7 +334,7 @@ final class BackupStore: @unchecked Sendable {
     // MARK: - Library paths
 
     /// The paths given to an asset's resources, by resource ID.
-    func paths(forAsset assetID: String) -> [String: String] {
+    public func paths(forAsset assetID: String) -> [String: String] {
         locked {
             let rows = query("SELECT resource_id, path FROM handled_paths WHERE asset_id = ? AND resource_id IS NOT NULL", [assetID]) {
                 (text($0, 0) ?? "", text($0, 1) ?? "")
@@ -341,19 +343,19 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func pathHolder(_ path: String) -> PathHolder {
+    public func pathHolder(_ path: String) -> PathHolder {
         locked { holder(ofPath: path) }
     }
 
     /// Lets go of a path whose resource is gone, such as after restoring to a phone where asset
     /// IDs differ. The path stays handled.
-    func releasePath(_ path: String) {
+    public func releasePath(_ path: String) {
         locked { execute("UPDATE handled_paths SET resource_id = NULL, asset_id = NULL WHERE norm = ?", [LibraryPath.normalized(path)]) }
     }
 
     /// Gives paths to resources. Returns false, changing nothing, if another resource holds one of
     /// them, in which case the caller looks for different paths.
-    func claim(_ rows: [ResourceRow]) -> Bool {
+    public func claim(_ rows: [ResourceRow]) -> Bool {
         locked {
             for row in rows {
                 if case let .resource(current) = holder(ofPath: row.path), current != row.id { return false }
@@ -372,7 +374,7 @@ final class BackupStore: @unchecked Sendable {
     /// Takes an asset's paths away because something else turned out to be at one of them, so it
     /// gets new ones and is backed up again. The old paths stay handled: copies may already be
     /// there, and those must not be imported as if they were someone else's pictures.
-    func retirePaths(forAsset assetID: String) {
+    public func retirePaths(forAsset assetID: String) {
         _ = locked { handledTransaction {
             execute("UPDATE handled_paths SET resource_id = NULL, asset_id = NULL, on_drive = 0, on_bucket = 0 WHERE asset_id = ?", [assetID])
             // Kept as pending so the asset can't count as complete until these are backed up again,
@@ -388,26 +390,26 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// `retirePaths` for an upload the bucket refused because the key already exists.
-    func retirePaths(forResource resourceID: String) {
+    public func retirePaths(forResource resourceID: String) {
         let assetID = locked { query("SELECT asset_id FROM resources WHERE id = ?", [resourceID]) { text($0, 0) }.first ?? nil }
         guard let assetID else { return }
         locked { execute("UPDATE resources SET state = ?, staged_name = NULL WHERE id = ?", [ResourceState.pending.rawValue, resourceID]) }
         retirePaths(forAsset: assetID)
     }
 
-    func isOnDrive(_ path: String) -> Bool {
+    public func isOnDrive(_ path: String) -> Bool {
         locked {
             query("SELECT on_drive FROM handled_paths WHERE norm = ?", [LibraryPath.normalized(path)]) { sqlite3_column_int($0, 0) != 0 }.first ?? false
         }
     }
 
-    func isInBucket(_ path: String) -> Bool {
+    public func isInBucket(_ path: String) -> Bool {
         locked {
             query("SELECT on_bucket FROM handled_paths WHERE norm = ?", [LibraryPath.normalized(path)]) { sqlite3_column_int($0, 0) != 0 }.first ?? false
         }
     }
 
-    func markOnDrive(_ path: String) {
+    public func markOnDrive(_ path: String) {
         locked {
             execute("UPDATE handled_paths SET on_drive = 1 WHERE norm = ? AND on_drive = 0", [LibraryPath.normalized(path)])
             if sqlite3_changes(db) > 0 { bumpHandledVersion() }
@@ -415,17 +417,17 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// Records the upload of an edited version that turned out to be in the bucket already.
-    func markDone(_ id: String, sha256: String?) {
+    public func markDone(_ id: String, sha256: String?) {
         locked { execute("UPDATE resources SET sha256 = ? WHERE id = ?", [sha256, id]) }
         markDone(id)
     }
 
     /// Normalized forms of every path that's been backed up or imported.
-    func handledPaths() -> Set<String> {
+    public func handledPaths() -> Set<String> {
         locked { Set(query("SELECT norm FROM handled_paths") { text($0, 0) ?? "" }) }
     }
 
-    func handledEntries() -> [HandledPath] {
+    public func handledEntries() -> [HandledPath] {
         locked {
             query("SELECT path, kind, resource_id, on_drive, on_bucket FROM handled_paths") { stmt in
                 HandledPath(
@@ -442,7 +444,7 @@ final class BackupStore: @unchecked Sendable {
     /// Adds entries read from a file in `source`. Paths already known keep what's known about them.
     /// A file only speaks for where it was found: the copy in the bucket says what's in that bucket,
     /// not what's on whichever drive is plugged in now.
-    func mergeHandled(_ entries: [HandledPath], from source: StorageSource) -> Bool {
+    public func mergeHandled(_ entries: [HandledPath], from source: StorageSource) -> Bool {
         guard !entries.isEmpty else { return true }
         return locked {
             handledTransaction {
@@ -464,22 +466,22 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// Goes up each time the handled paths change, to tell when copies in storage are out of date.
-    var handledVersion: Int {
+    public var handledVersion: Int {
         Int(meta("handled_version") ?? "") ?? 0
     }
 
-    func meta(_ key: String) -> String? {
+    public func meta(_ key: String) -> String? {
         locked { query("SELECT value FROM meta WHERE key = ?", [key]) { text($0, 0) }.first ?? nil }
     }
 
-    func setMeta(_ key: String, _ value: String) {
+    public func setMeta(_ key: String, _ value: String) {
         locked { execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", [key, value]) }
     }
 
     // MARK: - What's in storage
 
     /// Returns false, keeping the previous listing, if it couldn't be saved.
-    func replaceInventory(source: StorageSource, entries: [InventoryEntry]) -> Bool {
+    public func replaceInventory(source: StorageSource, entries: [InventoryEntry]) -> Bool {
         let rows = entries.map { (norm: LibraryPath.normalized($0.path), path: $0.path, size: $0.size) }
         return locked {
             transaction {
@@ -493,14 +495,14 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
-    func inventory() -> [InventoryEntry] {
+    public func inventory() -> [InventoryEntry] {
         locked {
             query("SELECT source, path, size FROM remote_files", [], inventoryEntry)
         }
     }
 
     /// Where a path is known to exist, with its exact spelling and size there.
-    func inventoryEntries(for path: String) -> [InventoryEntry] {
+    public func inventoryEntries(for path: String) -> [InventoryEntry] {
         locked {
             query("SELECT source, path, size FROM remote_files WHERE norm = ?", [LibraryPath.normalized(path)], inventoryEntry)
         }
@@ -508,20 +510,20 @@ final class BackupStore: @unchecked Sendable {
 
     // MARK: - Imported photos
 
-    func importedAssetIDs() -> Set<String> {
+    public func importedAssetIDs() -> Set<String> {
         locked { Set(query("SELECT asset_id FROM imported_assets") { text($0, 0) ?? "" }) }
     }
 
     /// A few of the imported IDs, to check that they still match the library.
-    func sampleImportedAssetIDs(limit: Int) -> [String] {
+    public func sampleImportedAssetIDs(limit: Int) -> [String] {
         locked { query("SELECT asset_id FROM imported_assets LIMIT ?", [limit]) { text($0, 0) ?? "" } }
     }
 
-    func importedTags() -> Set<String> {
+    public func importedTags() -> Set<String> {
         locked { Set(query("SELECT tag FROM imported_assets") { text($0, 0) ?? "" }) }
     }
 
-    func recordImports(_ imports: [(assetID: String, path: String)]) -> Bool {
+    public func recordImports(_ imports: [(assetID: String, path: String)]) -> Bool {
         guard !imports.isEmpty else { return true }
         return locked {
             handledTransaction {
@@ -534,7 +536,7 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// Replaces the record of imports with what was found in the Photos library.
-    func replaceImportedAssets(_ assets: [(assetID: String, tag: String)]) -> Bool {
+    public func replaceImportedAssets(_ assets: [(assetID: String, tag: String)]) -> Bool {
         locked {
             transaction {
                 execute("DELETE FROM imported_assets")
@@ -546,7 +548,7 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// Marks paths as dealt with because a copy of them was found in the Photos library.
-    func markImported(paths: [String]) -> Bool {
+    public func markImported(paths: [String]) -> Bool {
         guard !paths.isEmpty else { return true }
         return locked {
             handledTransaction {
@@ -558,20 +560,27 @@ final class BackupStore: @unchecked Sendable {
     // MARK: - Coverage
 
     /// How many photos in the library are backed up where.
-    struct Coverage: Equatable, Codable {
-        var total = 0
-        var cloud = 0
-        var drive = 0
-        var both = 0
+    public struct Coverage: Equatable, Codable, Sendable {
+        public var total: Int
+        public var cloud: Int
+        public var drive: Int
+        public var both: Int
 
-        var cloudOnly: Int { cloud - both }
-        var driveOnly: Int { drive - both }
-        var nowhere: Int { total - cloud - drive + both }
+        public init(total: Int = 0, cloud: Int = 0, drive: Int = 0, both: Int = 0) {
+            self.total = total
+            self.cloud = cloud
+            self.drive = drive
+            self.both = both
+        }
+
+        public var cloudOnly: Int { cloud - both }
+        public var driveOnly: Int { drive - both }
+        public var nowhere: Int { total - cloud - drive + both }
     }
 
     /// Replaces the IDs of the assets currently in the photo library, which `coverage` counts
     /// against (so deleted photos aren't counted).
-    func setLibraryAssets(_ ids: [String]) {
+    public func setLibraryAssets(_ ids: [String]) {
         locked {
             let saved = transaction {
                 execute("DELETE FROM library")
@@ -584,7 +593,7 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// Nil until the library has been listed, when every count would be zero.
-    func coverage(driveID: String?) -> Coverage? {
+    public func coverage(driveID: String?) -> Coverage? {
         locked {
             guard libraryLoaded else { return nil }
             return query("""

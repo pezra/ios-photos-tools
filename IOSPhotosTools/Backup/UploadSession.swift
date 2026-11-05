@@ -1,5 +1,6 @@
 import Foundation
 import S3Kit
+import SyncKit
 
 /// Wraps a background `URLSession` so uploads keep going while the app is suspended or terminated.
 final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable {
