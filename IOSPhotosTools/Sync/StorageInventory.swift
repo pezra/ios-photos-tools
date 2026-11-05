@@ -12,6 +12,14 @@ enum StorageInventory {
     /// How many changes to let build up before updating the copies in storage during a pass.
     private static let writeInterval = 500
 
+    enum Failure: Error, LocalizedError {
+        case couldNotSave
+
+        var errorDescription: String? {
+            "Couldn't save the record of what's in storage. This phone may be out of space."
+        }
+    }
+
     // MARK: - Drive
 
     /// Brings the record of handled paths and the listing of the drive up to date.
@@ -24,7 +32,7 @@ enum StorageInventory {
         let entries = walk(root: root)
         // A walk cut short by the drive being unplugged would look like missing files.
         guard (try? root.checkResourceIsReachable()) == true else { throw CocoaError(.fileNoSuchFile) }
-        store.replaceInventory(source: .drive, entries: entries)
+        guard store.replaceInventory(source: .drive, entries: entries) else { throw Failure.couldNotSave }
     }
 
     private static func walk(root: URL) -> [InventoryEntry] {
@@ -45,7 +53,7 @@ enum StorageInventory {
         guard store.meta(key) == nil else { return }
         let file = root.appending(path: HandledPathsFile.relativePath)
         if FileManager.default.fileExists(atPath: file.path) {
-            store.mergeHandled(HandledPathsFile.decode(try Data(contentsOf: file)), from: .drive)
+            guard store.mergeHandled(HandledPathsFile.decode(try Data(contentsOf: file)), from: .drive) else { throw Failure.couldNotSave }
         }
         store.setMeta(key, "1")
     }
@@ -92,7 +100,7 @@ enum StorageInventory {
             let path = String(object.key.dropFirst(root.count))
             return LibraryPath.isLibraryContent(path) ? InventoryEntry(source: .s3, path: path, size: object.size) : nil
         }
-        store.replaceInventory(source: .s3, entries: entries)
+        guard store.replaceInventory(source: .s3, entries: entries) else { throw Failure.couldNotSave }
         store.setMeta(listedKey(client: client, prefix: prefix), "1")
     }
 
@@ -106,7 +114,7 @@ enum StorageInventory {
         guard store.meta(key) == nil else { return }
         do {
             let data = try await client.getObject(key: handledKey(prefix: prefix), session: session)
-            store.mergeHandled(HandledPathsFile.decode(data), from: .s3)
+            guard store.mergeHandled(HandledPathsFile.decode(data), from: .s3) else { throw Failure.couldNotSave }
         } catch let error as S3Error where error.status == 404 {
             // Nothing there yet.
         }

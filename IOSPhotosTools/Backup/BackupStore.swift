@@ -41,6 +41,8 @@ final class BackupStore: @unchecked Sendable {
     private var db: OpaquePointer?
     private let lock = NSLock()
     private var libraryLoaded = false
+    private var inTransaction = false
+    private var statementFailed = false
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     private init() {
@@ -339,7 +341,7 @@ final class BackupStore: @unchecked Sendable {
             for row in rows {
                 if case let .resource(current) = holder(ofPath: row.path), current != row.id { return false }
             }
-            transaction {
+            return handledTransaction {
                 for row in rows {
                     execute("""
                         INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id) VALUES (?, ?, ?, ?, ?)
@@ -347,8 +349,6 @@ final class BackupStore: @unchecked Sendable {
                         """, [LibraryPath.normalized(row.path), row.path, HandledPath.Kind.backup.rawValue, row.id, row.assetID])
                 }
             }
-            bumpHandledVersion()
-            return true
         }
     }
 
@@ -356,7 +356,7 @@ final class BackupStore: @unchecked Sendable {
     /// gets new ones and is backed up again. The old paths stay handled: copies may already be
     /// there, and those must not be imported as if they were someone else's pictures.
     func retirePaths(forAsset assetID: String) {
-        locked {
+        _ = locked { handledTransaction {
             execute("UPDATE handled_paths SET resource_id = NULL, asset_id = NULL, on_drive = 0, on_bucket = 0 WHERE asset_id = ?", [assetID])
             // Kept as pending so the asset can't count as complete until these are backed up again,
             // even if another of its files finishes uploading in the meantime.
@@ -367,8 +367,7 @@ final class BackupStore: @unchecked Sendable {
                     [assetID, ResourceState.uploading.rawValue])
             execute("DELETE FROM assets WHERE id = ?", [assetID])
             execute("DELETE FROM drive_assets WHERE asset_id = ?", [assetID])
-            bumpHandledVersion()
-        }
+        } }
     }
 
     /// `retirePaths` for an upload the bucket refused because the key already exists.
@@ -426,10 +425,10 @@ final class BackupStore: @unchecked Sendable {
     /// Adds entries read from a file in `source`. Paths already known keep what's known about them.
     /// A file only speaks for where it was found: the copy in the bucket says what's in that bucket,
     /// not what's on whichever drive is plugged in now.
-    func mergeHandled(_ entries: [HandledPath], from source: StorageSource) {
-        guard !entries.isEmpty else { return }
-        locked {
-            transaction {
+    func mergeHandled(_ entries: [HandledPath], from source: StorageSource) -> Bool {
+        guard !entries.isEmpty else { return true }
+        return locked {
+            handledTransaction {
                 for entry in entries {
                     let assetID = entry.resourceID.map(ResourceRow.assetID(ofResource:))
                     execute("""
@@ -439,7 +438,6 @@ final class BackupStore: @unchecked Sendable {
                               source == .drive && entry.onDrive == true ? 1 : 0, source == .s3 && entry.inBucket == true ? 1 : 0])
                 }
             }
-            bumpHandledVersion()
         }
     }
 
@@ -463,9 +461,10 @@ final class BackupStore: @unchecked Sendable {
 
     // MARK: - What's in storage
 
-    func replaceInventory(source: StorageSource, entries: [InventoryEntry]) {
+    /// Returns false, keeping the previous listing, if it couldn't be saved.
+    func replaceInventory(source: StorageSource, entries: [InventoryEntry]) -> Bool {
         let rows = entries.map { (norm: LibraryPath.normalized($0.path), path: $0.path, size: $0.size) }
-        locked {
+        return locked {
             transaction {
                 execute("DELETE FROM remote_files WHERE source = ?", [source.rawValue])
                 try insert("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)", [source.rawValue], rows: rows) { stmt, row in
@@ -505,21 +504,20 @@ final class BackupStore: @unchecked Sendable {
         locked { Set(query("SELECT tag FROM imported_assets") { text($0, 0) ?? "" }) }
     }
 
-    func recordImports(_ imports: [(assetID: String, path: String)]) {
-        guard !imports.isEmpty else { return }
-        locked {
-            transaction {
+    func recordImports(_ imports: [(assetID: String, path: String)]) -> Bool {
+        guard !imports.isEmpty else { return true }
+        return locked {
+            handledTransaction {
                 for item in imports {
                     execute("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", [item.assetID, LibraryPath.tag(for: item.path)])
                     addImportedPath(item.path)
                 }
             }
-            bumpHandledVersion()
         }
     }
 
     /// Replaces the record of imports with what was found in the Photos library.
-    func replaceImportedAssets(_ assets: [(assetID: String, tag: String)]) {
+    func replaceImportedAssets(_ assets: [(assetID: String, tag: String)]) -> Bool {
         locked {
             transaction {
                 execute("DELETE FROM imported_assets")
@@ -531,13 +529,12 @@ final class BackupStore: @unchecked Sendable {
     }
 
     /// Marks paths as dealt with because a copy of them was found in the Photos library.
-    func markImported(paths: [String]) {
-        guard !paths.isEmpty else { return }
-        locked {
-            transaction {
+    func markImported(paths: [String]) -> Bool {
+        guard !paths.isEmpty else { return true }
+        return locked {
+            handledTransaction {
                 for path in paths { addImportedPath(path) }
             }
-            bumpHandledVersion()
         }
     }
 
@@ -622,26 +619,41 @@ final class BackupStore: @unchecked Sendable {
             """, [assetID, now, assetID])
     }
 
-    @discardableResult
     private func locked<T>(_ body: () -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
         return body()
     }
 
-    /// Undone if `body` throws, leaving things as they were. Returns whether it was committed.
-    @discardableResult
+    /// All or nothing: if a statement fails or `body` throws, the rest is skipped and things are
+    /// left as they were. Returns whether it was saved.
     private func transaction(_ body: () throws -> Void) -> Bool {
+        inTransaction = true
+        defer {
+            inTransaction = false
+            statementFailed = false
+        }
         execute("BEGIN")
+        guard !statementFailed else { return false }
         do {
             try body()
             execute("COMMIT")
-            return true
         } catch {
-            print("SQLite transaction rolled back: \(error)")
-            execute("ROLLBACK")
-            return false
+            print("SQLite transaction failed: \(error)")
+            statementFailed = true
         }
+        guard statementFailed else { return true }
+        statementFailed = false
+        inTransaction = false
+        execute("ROLLBACK")
+        return false
+    }
+
+    /// A transaction that changes the handled paths.
+    private func handledTransaction(_ body: () throws -> Void) -> Bool {
+        let saved = transaction(body)
+        if saved { bumpHandledVersion() }
+        return saved
     }
 
     private struct StatementFailure: Error {
@@ -650,6 +662,7 @@ final class BackupStore: @unchecked Sendable {
 
     /// Runs one statement for each row, stopping at the first failure.
     private func insert<Row>(_ sql: String, _ args: [Any?] = [], rows: [Row], bind: (OpaquePointer, Row) -> Void) throws {
+        guard !statementFailed else { return }
         guard let stmt = prepare(sql, args) else { throw StatementFailure(message: "Couldn't prepare \(sql)") }
         defer { sqlite3_finalize(stmt) }
         for row in rows {
@@ -680,10 +693,15 @@ final class BackupStore: @unchecked Sendable {
     }
 
     private func execute(_ sql: String, _ args: [Any?] = []) {
-        guard let stmt = prepare(sql, args) else { return }
+        guard !statementFailed else { return }
+        guard let stmt = prepare(sql, args) else {
+            statementFailed = inTransaction
+            return
+        }
         defer { sqlite3_finalize(stmt) }
         if sqlite3_step(stmt) != SQLITE_DONE {
             print("SQLite step failed: \(String(cString: sqlite3_errmsg(db))) — \(sql)")
+            statementFailed = inTransaction
         }
     }
 

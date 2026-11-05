@@ -222,10 +222,11 @@ actor LibrarySyncEngine {
             }
         }
         if cancelled { throw CancellationError() }
-        store.replaceImportedAssets(found)
+        guard store.replaceImportedAssets(found) else { throw StorageInventory.Failure.couldNotSave }
 
         let tags = Set(found.map(\.tag))
-        store.markImported(paths: store.inventory().map(\.path).filter { tags.contains(LibraryPath.tag(for: $0)) })
+        let importedPaths = store.inventory().map(\.path).filter { tags.contains(LibraryPath.tag(for: $0)) }
+        guard store.markImported(paths: importedPaths) else { throw StorageInventory.Failure.couldNotSave }
         store.setMeta("imports-scanned", "1")
     }
 
@@ -304,7 +305,9 @@ actor LibrarySyncEngine {
     private func importToLibrary(_ items: [Prepared], albums: Albums) async -> ImportOutcome {
         guard !items.isEmpty else { return ImportOutcome() }
         do {
-            store.recordImports(try await Self.create(items, albums: albums))
+            guard store.recordImports(try await Self.create(items, albums: albums)) else {
+                return ImportOutcome(failed: items.count, lastError: StorageInventory.Failure.couldNotSave.localizedDescription)
+            }
             return ImportOutcome()
         } catch where items.count > 1 {
             var outcome = ImportOutcome()
