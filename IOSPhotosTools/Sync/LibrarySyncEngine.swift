@@ -305,10 +305,15 @@ actor LibrarySyncEngine {
     private func importToLibrary(_ items: [Prepared], albums: Albums) async -> ImportOutcome {
         guard !items.isEmpty else { return ImportOutcome() }
         do {
-            guard store.recordImports(try await Self.create(items, albums: albums)) else {
+            let created = try await Self.create(items, albums: albums)
+            guard store.recordImports(created) else {
                 return ImportOutcome(failed: items.count, lastError: StorageInventory.Failure.couldNotSave.localizedDescription)
             }
-            return ImportOutcome()
+            // Photos gave these no ID, so they can't be recorded as imported.
+            let recorded = Set(created.map(\.path))
+            let missing = items.filter { !recorded.contains($0.path) }
+            return ImportOutcome(failed: missing.count,
+                                 lastError: missing.first.map { "\($0.path): Photos didn't confirm adding this picture." })
         } catch where items.count > 1 {
             var outcome = ImportOutcome()
             for item in items {
