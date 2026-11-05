@@ -159,10 +159,12 @@ public enum TripDetector {
     static func sites(_ tagged: [TripPhoto], untagged: [TripPhoto], options: Options) -> [Site] {
         struct Builder {
             var photos: [TripPhoto]
+            /// How many of the photos have a location, which is all the center goes by.
+            var located = 1
             var latSum: Double
             var lonSum: Double
             var center: Coordinate {
-                Coordinate(latitude: latSum / Double(photos.count), longitude: lonSum / Double(photos.count))
+                Coordinate(latitude: latSum / Double(located), longitude: lonSum / Double(located))
             }
 
             init(_ photo: TripPhoto) {
@@ -173,12 +175,14 @@ public enum TripDetector {
 
             mutating func add(_ photo: TripPhoto) {
                 photos.append(photo)
+                located += 1
                 latSum += photo.coordinate!.latitude
                 lonSum += photo.coordinate!.longitude
             }
 
             mutating func merge(_ other: Builder) {
                 photos += other.photos
+                located += other.located
                 latSum += other.latSum
                 lonSum += other.lonSum
             }

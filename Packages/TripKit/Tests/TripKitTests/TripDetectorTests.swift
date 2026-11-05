@@ -120,5 +120,13 @@ final class TripDetectorTests: XCTestCase {
         let trip = TripDetector.trips(photos, now: base + 200 * day, calendar: calendar)[0]
         XCTAssertEqual(trip.sites.count, 2)
     }
+
+    func testPhotosWithoutALocationDontMoveASite() throws {
+        let tagged = burst(lisbon, at: base, count: 3)
+        let untagged = (0..<9).map { photo(nil, base + Double($0) * 10) }
+        let site = try XCTUnwrap(TripDetector.sites(tagged, untagged: untagged, options: .init()).first)
+        XCTAssertEqual(site.photoIDs.count, 12)
+        XCTAssertLessThan(site.center.distance(to: lisbon), 100)
+    }
 }
 
