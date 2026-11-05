@@ -29,14 +29,6 @@ notify() {
     osascript -e "display notification \"$1\" with title \"Photos Tools renewal\"" >/dev/null 2>&1 || true
 }
 
-# Only one run at a time. launchd can start one while a slow build is still going.
-LOCK="$STATE_DIR/lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-    log "Another run is in progress."
-    exit 0
-fi
-trap 'rmdir "$LOCK"' EXIT
-
 now=$(date +%s)
 installed_expiry=$(cat "$EXPIRY_FILE" 2>/dev/null || echo 0)
 remaining=$((installed_expiry - now))
@@ -51,6 +43,36 @@ notify_if_urgent() {
         notify "$1 The app expires soon."
     fi
 }
+
+# A process ID plus its start time, since IDs get reused.
+process_identity() {
+    local started
+    started=$(ps -o lstart= -p "$1" 2>/dev/null) && echo "$1 $started"
+}
+
+# Only one run at a time. launchd can start one while a slow build is still going. The lock says
+# which process holds it, so one left by a crash or power loss doesn't block every later run.
+LOCK="$STATE_DIR/run.lock"
+CLAIM="$LOCK.$$"
+process_identity $$ >"$CLAIM"
+if ! ln "$CLAIM" "$LOCK" 2>/dev/null; then
+    holder=$(cat "$LOCK" 2>/dev/null || true)
+    if [[ -n "$holder" && "$(process_identity "${holder%% *}" || true)" == "$holder" ]]; then
+        rm -f "$CLAIM"
+        log "Another run is in progress."
+        notify_if_urgent "A renewal is still running, or is stuck."
+        exit 0
+    fi
+    log "Clearing a lock left by a run that died."
+    rm -f "$LOCK"
+    if ! ln "$CLAIM" "$LOCK" 2>/dev/null; then
+        rm -f "$CLAIM"
+        log "Another run is in progress."
+        exit 0
+    fi
+fi
+rm -f "$CLAIM"
+trap 'rm -f "$LOCK"' EXIT
 
 fail() {
     log "FAILED: $1"
