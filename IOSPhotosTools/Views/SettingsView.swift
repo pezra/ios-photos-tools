@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var confirmingSync = false
     @State private var pendingSync = 0
     @State private var syncError: String?
+    @State private var lacksConditionalWrites = false
 
     var body: some View {
         @Bindable var settings = settings
@@ -70,6 +71,11 @@ struct SettingsView: View {
                         Label(error.localizedDescription, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
                     case nil:
                         EmptyView()
+                    }
+                    if lacksConditionalWrites {
+                        Label("This service can't refuse an upload to a name that's taken, so only checking its list first keeps a different picture from being overwritten. Turn on bucket versioning.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
                     }
                 } footer: {
                     Text("Uploads a small test file to the folder above.")
@@ -135,6 +141,7 @@ struct SettingsView: View {
                     Text("Makes the next backup check every photo again and upload whatever isn't in the bucket. Use this after switching to a different bucket.")
                 }
             }
+            .task { refreshConditionalWrites() }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -172,12 +179,22 @@ struct SettingsView: View {
             try await client.putObject(key: key, data: Data("Photos Tools connection test\n".utf8), contentType: "text/plain")
             _ = try await client.listObjects(prefix: key)
             _ = try await client.getObject(key: key)
+            _ = try? await StorageInventory.checkConditionalWrites(client: client, prefix: snapshot.prefix, session: .shared)
+            refreshConditionalWrites()
             testResult = .success("Wrote, listed and read \(key)")
         } catch let error as S3Error where error.status == 403 {
             testResult = .failure(ConnectionError.needsReadAccess(error))
         } catch {
             testResult = .failure(error)
         }
+    }
+
+    private func refreshConditionalWrites() {
+        guard let snapshot = SettingsStore.snapshot(), let client = try? S3Client(config: snapshot.s3) else {
+            lacksConditionalWrites = false
+            return
+        }
+        lacksConditionalWrites = StorageInventory.lacksConditionalWrites(client: client, prefix: snapshot.prefix)
     }
 
     private enum ConnectionError: Error, LocalizedError {

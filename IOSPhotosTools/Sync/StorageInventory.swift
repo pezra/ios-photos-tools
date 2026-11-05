@@ -104,6 +104,49 @@ enum StorageInventory {
         store.setMeta(listedKey(client: client, prefix: prefix), "1")
     }
 
+    /// Whether uploads to this bucket can ask to be refused if a name is taken, the last guard
+    /// against overwriting a different picture. Asks the bucket now and then, since services can
+    /// start supporting it. If it can't be asked, assumes the last answer, or that it can.
+    static func supportsConditionalWrites(client: S3Client, prefix: String, session: URLSession) async -> Bool {
+        let key = conditionalWritesKey(client: client, prefix: prefix)
+        let known = store.meta(key)?.split(separator: " ")
+        let isCurrent = known.flatMap { $0.last }.flatMap { Double($0) }
+            .map { Date().timeIntervalSince1970 - $0 < conditionalWritesCheckInterval } ?? false
+        if let answer = known?.first, isCurrent, store.meta(recheckConditionalWritesKey) != "1" { return answer == "1" }
+        do {
+            return try await checkConditionalWrites(client: client, prefix: prefix, session: session)
+        } catch {
+            print("Couldn't check for conditional writes: \(error)")
+            return known?.first.map { $0 == "1" } ?? true
+        }
+    }
+
+    /// Asks the bucket, and remembers the answer.
+    static func checkConditionalWrites(client: S3Client, prefix: String, session: URLSession) async throws -> Bool {
+        let probe = LibraryPath.key(prefix: prefix, path: ".photos-tools/conditional-write-check")
+        let supported = try await client.supportsConditionalWrites(key: probe, session: session)
+        store.setMeta(conditionalWritesKey(client: client, prefix: prefix), "\(supported ? 1 : 0) \(Date().timeIntervalSince1970)")
+        store.setMeta(recheckConditionalWritesKey, "0")
+        return supported
+    }
+
+    /// Whether this bucket is known not to support them, which is worth telling the user about.
+    static func lacksConditionalWrites(client: S3Client, prefix: String) -> Bool {
+        store.meta(conditionalWritesKey(client: client, prefix: prefix))?.hasPrefix("0") == true
+    }
+
+    /// For an upload turned away for asking, which means the last answer is out of date.
+    static func recheckConditionalWrites() {
+        store.setMeta(recheckConditionalWritesKey, "1")
+    }
+
+    private static let conditionalWritesCheckInterval: TimeInterval = 7 * 24 * 60 * 60
+    private static let recheckConditionalWritesKey = "recheck-conditional-writes"
+
+    private static func conditionalWritesKey(client: S3Client, prefix: String) -> String {
+        "conditional-writes-\(identity(client: client, prefix: prefix))"
+    }
+
     /// Whether this bucket has ever been listed, which name collisions are checked against.
     static func hasListedS3(client: S3Client, prefix: String) -> Bool {
         store.meta(listedKey(client: client, prefix: prefix)) != nil

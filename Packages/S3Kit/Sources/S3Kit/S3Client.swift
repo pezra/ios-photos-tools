@@ -209,6 +209,26 @@ public struct S3Client: Sendable {
         _ = try checked(body, response)
     }
 
+    /// Whether the bucket refuses a write to a key that's taken when asked to with `If-None-Match`.
+    /// Some services answer 501, and others ignore it. Writes to `key`, which should be kept for
+    /// this. Needs `s3:PutObject`.
+    public func supportsConditionalWrites(key: String, session: URLSession = .shared) async throws -> Bool {
+        let data = Data("Photos Tools checks here whether this service can refuse a write\n".utf8)
+        // Twice, since a first write can succeed either way. A service that ignores it takes both.
+        for _ in 0..<2 {
+            let request = signedRequest(method: "PUT", key: key, headers: ["if-none-match": "*"], payloadHash: SigV4.sha256Hex(data))
+            let (body, response) = try await session.upload(for: request, from: data)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            switch status {
+            case 412: return true
+            case 501: return false
+            case 200..<300: continue
+            default: throw S3Error.from(status: status, body: body)
+            }
+        }
+        return false
+    }
+
     /// Every object whose key starts with `prefix`. Needs `s3:ListBucket`.
     public func listObjects(prefix: String, session: URLSession = .shared) async throws -> [S3Object] {
         var objects: [S3Object] = []

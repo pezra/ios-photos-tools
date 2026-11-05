@@ -30,23 +30,17 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
     }
 
     /// `mustNotExist` makes the bucket refuse the upload if something is already at that key, as a
-    /// last guard against overwriting a different picture. Services that don't support this (such
-    /// as Backblaze B2) answer 501, and are then left to the check against the bucket's listing.
+    /// last guard against overwriting a different picture. Only for services that support this:
+    /// see `StorageInventory.supportsConditionalWrites`.
     func upload(file: URL, to url: URL, contentType: String, resourceID: String, allowCellular: Bool, mustNotExist: Bool) {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        if mustNotExist && BackupStore.shared.meta(Self.noConditionalWritesKey(for: url)) == nil {
-            request.setValue("*", forHTTPHeaderField: "If-None-Match")
-        }
+        if mustNotExist { request.setValue("*", forHTTPHeaderField: "If-None-Match") }
         request.allowsCellularAccess = allowCellular
         let task = session.uploadTask(with: request, fromFile: file)
         task.taskDescription = resourceID
         task.resume()
-    }
-
-    private static func noConditionalWritesKey(for url: URL) -> String {
-        "no-conditional-writes-\(url.host() ?? "")"
     }
 
     // MARK: - URLSessionDataDelegate
@@ -79,11 +73,8 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
             // Something's already there. The next pass compares it: the same photo (an earlier
             // upload whose response was lost) is adopted, and anything else gets a new name.
             store.retirePaths(forResource: resourceID)
-        } else if status == 501, let request = task.originalRequest, let url = request.url,
-                  request.value(forHTTPHeaderField: "If-None-Match") != nil {
-            store.setMeta(Self.noConditionalWritesKey(for: url), "1")
-            store.resetToPending(resourceID)
         } else {
+            if status == 501 { StorageInventory.recheckConditionalWrites() }
             store.markFailed(resourceID, error: S3Error.from(status: status, body: body).localizedDescription)
         }
         Staging.remove(stagedName)

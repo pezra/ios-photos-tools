@@ -75,11 +75,13 @@ actor BackupEngine {
         store.forgetResourcesOfMissingAssets()
         await MainActor.run { BackupStatus.shared.refreshCounts() }
 
+        var conditionalWrites = true
         // Names are checked against what's in the bucket so nothing is overwritten, so without a
         // listing nothing can safely be uploaded.
         if !pending.isEmpty {
             do {
                 try await StorageInventory.prepareS3(client: client, prefix: settings.prefix, session: session)
+                conditionalWrites = await StorageInventory.supportsConditionalWrites(client: client, prefix: settings.prefix, session: session)
             } catch let error as URLError where error.networkUnavailableReason == .cellular {
                 await report(phase: "Waiting for Wi-Fi", running: false)
                 return
@@ -96,7 +98,7 @@ actor BackupEngine {
             await waitForUploadSlot()
             if Task.isCancelled { break }
             await report(phase: "Preparing \(index + 1) of \(pending.count)", running: true)
-            if let error = await stage(asset, client: client, settings: settings) {
+            if let error = await stage(asset, client: client, settings: settings, conditionalWrites: conditionalWrites) {
                 namingFailures += 1
                 namingError = error.localizedDescription
             }
@@ -108,7 +110,7 @@ actor BackupEngine {
             while !Task.isCancelled && store.count(.uploading) > 0 {
                 try? await Task.sleep(for: .seconds(2))
             }
-            // Uploads the bucket turned away because of how they were sent, or because of the name.
+            // Uploads the bucket turned away because of the name.
             if !isRetry && store.count(.pending) > 0 {
                 return await performPass(isRetry: true)
             }
@@ -121,7 +123,7 @@ actor BackupEngine {
     }
 
     /// Returns an error if the asset's files couldn't be given paths, so it's tried again next pass.
-    private func stage(_ asset: PHAsset, client: S3Client, settings: SettingsStore.Snapshot) async -> Error? {
+    private func stage(_ asset: PHAsset, client: S3Client, settings: SettingsStore.Snapshot, conditionalWrites: Bool) async -> Error? {
         let assetID = asset.localIdentifier
         let modifiedAt = asset.modificationDate?.timeIntervalSince1970
         let resources: [(PHAssetResource, ResourceRow)]
@@ -204,7 +206,7 @@ actor BackupEngine {
                 contentType: PhotoLibrary.contentType(of: resource),
                 resourceID: row.id,
                 allowCellular: settings.allowCellular,
-                mustNotExist: !isEdit || !isOwn
+                mustNotExist: conditionalWrites && (!isEdit || !isOwn)
             )
         }
         // Records the new modification date when nothing needed uploading.
