@@ -39,6 +39,8 @@ actor BackupEngine {
         let pass = Task {
             await performPass()
             currentPass = nil
+            // Even if this pass couldn't back anything up: syncing can still work from the drive.
+            if !Task.isCancelled { LibrarySyncEngine.start() }
         }
         currentPass = pass
         return pass
@@ -109,7 +111,6 @@ actor BackupEngine {
         let failed = store.count(.failed) + namingFailures
         let phase = Task.isCancelled ? "Paused" : failed > 0 ? "Finished with \(failed) failed files" : "Up to date"
         await report(phase: phase, running: false, error: failed > 0 ? store.lastError() ?? namingError : nil, finished: !Task.isCancelled)
-        if !Task.isCancelled { LibrarySyncEngine.start() }
     }
 
     /// Returns an error if the asset's files couldn't be given paths, so it's tried again next pass.
