@@ -72,6 +72,7 @@ actor BackupEngine {
 
         let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedAssets())
         store.setLibraryAssets(libraryIDs)
+        store.forgetResourcesOfMissingAssets()
         await MainActor.run { BackupStatus.shared.refreshCounts() }
 
         // Names are checked against what's in the bucket so nothing is overwritten, so without a
@@ -129,6 +130,7 @@ actor BackupEngine {
         } catch {
             return error
         }
+        store.forgetMissingResources(forAsset: assetID, keeping: resources.map(\.1.id))
         guard !resources.isEmpty else {
             store.markAssetComplete(assetID, modifiedAt: modifiedAt)
             return nil

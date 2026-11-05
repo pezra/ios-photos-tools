@@ -254,6 +254,23 @@ final class BackupStore: @unchecked Sendable {
         }
     }
 
+    /// Forgets files an asset no longer has, such as an edit reverted before it could upload, which
+    /// would otherwise keep the asset from ever being complete. Files that did upload stay on record.
+    func forgetMissingResources(forAsset assetID: String, keeping ids: [String]) {
+        let marks = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+        let args: [Any?] = [assetID, ResourceState.pending.rawValue, ResourceState.failed.rawValue] + ids
+        locked { execute("DELETE FROM resources WHERE asset_id = ? AND state IN (?, ?) AND id NOT IN (\(marks))", args) }
+    }
+
+    /// Forgets files still waiting to upload whose photos have left the library (as listed by
+    /// `setLibraryAssets`), which would otherwise count as failed on every pass.
+    func forgetResourcesOfMissingAssets() {
+        locked {
+            execute("DELETE FROM resources WHERE state IN (?, ?) AND asset_id NOT IN (SELECT id FROM library)",
+                    [ResourceState.pending.rawValue, ResourceState.failed.rawValue])
+        }
+    }
+
     /// Marks the asset complete if every one of its resources has uploaded.
     func markAssetCompleteIfFinished(_ assetID: String) {
         locked { completeAssetIfFinished(assetID) }
