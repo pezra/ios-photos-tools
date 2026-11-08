@@ -12,6 +12,9 @@ source "$(dirname "$0")/env.sh"
 auth=(-H "Authorization: AWS4-HMAC-SHA256 Credential=$S3_KEY/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=0"
       -H "x-amz-content-sha256: UNSIGNED-PAYLOAD")
 
+# A key as it goes in a URL: spaces and the like escaped, slashes kept.
+encode() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$1"; }
+
 case "${1:-}" in
 up)
     if ! docker ps --format '{{.Names}}' | grep -qx "$S3_CONTAINER"; then
@@ -47,10 +50,12 @@ for v in ET.parse(sys.stdin).getroot().findall("s:Version", ns):
     print(v.find("s:Size", ns).text.rjust(10), v.find("s:IsLatest", ns).text.ljust(5), v.find("s:Key", ns).text)'
     ;;
 put)
-    curl -sf -o /dev/null "${auth[@]}" -X PUT --data-binary "@$4" "$S3_URL/$2/$3" && echo "Put $3"
+    [[ -f "${4:-}" ]] || { echo "No such file: ${4:-}" >&2; exit 1; }
+    curl -sf -o /dev/null "${auth[@]}" -X PUT -H "Content-Type: application/octet-stream" -H "Content-Length: $(wc -c < "$4" | tr -d ' ')" \
+        --data-binary "@$4" "$S3_URL/$2/$(encode "$3")" && echo "Put $3"
     ;;
 rm)
-    curl -sf -o /dev/null "${auth[@]}" -X DELETE "$S3_URL/$2/$3" && echo "Deleted $3"
+    curl -sf -o /dev/null "${auth[@]}" -X DELETE "$S3_URL/$2/$(encode "$3")" && echo "Deleted $3"
     ;;
 *)
     echo "usage: s3.sh up|down|ls BUCKET|versions BUCKET|put BUCKET KEY FILE|rm BUCKET KEY" >&2

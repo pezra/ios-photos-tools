@@ -1,7 +1,8 @@
 # Shared settings for the simulator scripts. Sourced, not run.
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# BASH_SOURCE is unset in zsh, which has the sourced file in $0 instead.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 BUNDLE_ID="org.barelyenough.ios-photos-tools"
 SIM_NAME="${SIM_NAME:-iPhone 17}"
 WORK_DIR="$HOME/Library/Caches/ios-photos-tools-sim"
