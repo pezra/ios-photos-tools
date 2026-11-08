@@ -256,6 +256,19 @@ public struct S3Client: Sendable {
         return try checked(body, response)
     }
 
+    /// The size of the object at `key`, or nil if there's nothing there. Needs `s3:GetObject`.
+    public func headObject(key: String, session: URLSession = .shared) async throws -> Int64? {
+        let request = signedRequest(method: "HEAD", key: key, payloadHash: SigV4.emptyPayloadHash)
+        let (body, response) = try await session.data(for: request)
+        let http = response as? HTTPURLResponse
+        if http?.statusCode == 404 { return nil }
+        _ = try checked(body, response)
+        guard let length = http?.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init) else {
+            throw S3Error.http(status: http?.statusCode ?? 0, code: nil, message: "No Content-Length")
+        }
+        return length
+    }
+
     /// Downloads an object to a temporary file, which the caller must move or delete.
     public func downloadObject(key: String, session: URLSession = .shared) async throws -> URL {
         let request = signedRequest(method: "GET", key: key, payloadHash: SigV4.emptyPayloadHash)
