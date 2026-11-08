@@ -75,7 +75,9 @@ enum StorageInventory {
         let current = identity(client: client, prefix: prefix)
         let previous = store.meta("current-bucket")
         if previous != current {
-            if previous != nil { store.forgetBucketContents() }
+            // Identities used to leave out the service, so one of those is taken to be this bucket.
+            let isOlderForm = previous == "\(client.config.bucket)/\(prefix)"
+            if previous != nil && !isOlderForm { store.forgetBucketContents() }
             store.setMeta("current-bucket", current)
         }
         try await mergeHandledPaths(fromS3: client, prefix: prefix, session: session)
@@ -181,8 +183,11 @@ enum StorageInventory {
         LibraryPath.key(prefix: prefix, path: HandledPathsFile.relativePath)
     }
 
+    /// The service is part of it, since a bucket of the same name elsewhere is a different one.
     private static func identity(client: S3Client, prefix: String) -> String {
-        "\(client.config.bucket)/\(prefix)"
+        let endpoint = client.config.endpoint
+        let service = (endpoint.host ?? "").lowercased() + (endpoint.port.map { ":\($0)" } ?? "")
+        return "\(service)/\(client.config.bucket)/\(prefix)"
     }
 
     private static func listedKey(client: S3Client, prefix: String) -> String {
