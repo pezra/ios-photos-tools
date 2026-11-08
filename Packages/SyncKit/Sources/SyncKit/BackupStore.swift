@@ -126,8 +126,7 @@ public final class BackupStore: @unchecked Sendable {
     /// The layout changed from `<year>/<month>/<asset-uuid>/<file>` to the picture library's, so
     /// everything is backed up again.
     private func migrateToLibraryLayout(_ onLayoutChange: () -> Void) {
-        let version = query("PRAGMA user_version") { Int(sqlite3_column_int($0, 0)) }.first ?? 0
-        guard version < 1 else { return }
+        guard userVersion < 1 else { return }
         execute("DELETE FROM resources")
         execute("DELETE FROM assets")
         execute("DELETE FROM drive_assets")
@@ -137,11 +136,14 @@ public final class BackupStore: @unchecked Sendable {
 
     /// Files already uploaded from this phone are known to be in the bucket.
     private func recordWhatIsInBucket() {
-        let version = query("PRAGMA user_version") { Int(sqlite3_column_int($0, 0)) }.first ?? 0
-        guard version < 2 else { return }
+        guard userVersion < 2 else { return }
         execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id IN (SELECT id FROM resources WHERE state = ?)",
                 [ResourceState.done.rawValue])
         sqlite3_exec(db, "PRAGMA user_version = 2", nil, nil, nil)
+    }
+
+    private var userVersion: Int {
+        query("PRAGMA user_version") { Int(sqlite3_column_int($0, 0)) }.first ?? 0
     }
 
     // MARK: - Queries
@@ -149,13 +151,7 @@ public final class BackupStore: @unchecked Sendable {
     /// Completed assets mapped to the asset modification date they were backed up at
     /// (nil if unknown, which forces a recheck).
     public func completedAssets() -> [String: Double?] {
-        locked {
-            let rows = query("SELECT id, modified_at FROM assets") { stmt -> (String, Double?) in
-                let modified = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
-                return (text(stmt, 0) ?? "", modified)
-            }
-            return Dictionary(rows, uniquingKeysWith: { $1 })
-        }
+        locked { modifiedDates("SELECT id, modified_at FROM assets") }
     }
 
     public func count(_ state: ResourceState) -> Int {
@@ -296,13 +292,7 @@ public final class BackupStore: @unchecked Sendable {
 
     /// Assets copied to the drive, mapped to the asset modification date they were copied at.
     public func completedDriveAssets(driveID: String) -> [String: Double?] {
-        locked {
-            let rows = query("SELECT asset_id, modified_at FROM drive_assets WHERE drive_id = ?", [driveID]) { stmt -> (String, Double?) in
-                let modified = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
-                return (text(stmt, 0) ?? "", modified)
-            }
-            return Dictionary(rows, uniquingKeysWith: { $1 })
-        }
+        locked { modifiedDates("SELECT asset_id, modified_at FROM drive_assets WHERE drive_id = ?", [driveID]) }
     }
 
     public func markDriveAssetComplete(_ assetID: String, driveID: String, modifiedAt: Double?) {
@@ -692,6 +682,15 @@ public final class BackupStore: @unchecked Sendable {
         if sqlite3_changes(db) > 0 { bumpHandledVersion() }
         guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
         completeAssetIfFinished(assetID)
+    }
+
+    /// Asset IDs mapped to the modification dates in the second column, which may be null.
+    private func modifiedDates(_ sql: String, _ args: [Any?] = []) -> [String: Double?] {
+        let rows = query(sql, args) { stmt -> (String, Double?) in
+            let modified = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
+            return (text(stmt, 0) ?? "", modified)
+        }
+        return Dictionary(rows, uniquingKeysWith: { $1 })
     }
 
     private func completeAssetIfFinished(_ assetID: String) {
