@@ -12,5 +12,6 @@ xcodebuild -project "$REPO/IOSPhotosTools.xcodeproj" -scheme IOSPhotosTools \
     -destination "id=$udid" -derivedDataPath "$DERIVED_DATA" build >"$WORK_DIR/build.log" 2>&1 \
     || { tail -20 "$WORK_DIR/build.log"; echo "Build failed; see $WORK_DIR/build.log"; exit 1; }
 xcrun simctl install "$udid" "$APP"
-xcrun simctl privacy "$udid" grant photos "$BUNDLE_ID"
-echo "Installed on $SIM_NAME ($udid), with photo access."
+# No `simctl privacy grant photos`: on this simulator it leaves access undecided, replacing a grant
+# made by tapping "Allow Full Access", which lasts until the app is uninstalled.
+echo "Installed on $SIM_NAME ($udid)."
