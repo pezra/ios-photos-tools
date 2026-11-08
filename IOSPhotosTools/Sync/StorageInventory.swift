@@ -157,8 +157,43 @@ enum StorageInventory {
         store.meta(conditionalWritesKey(client: client, prefix: prefix))?.hasPrefix("0") == true
     }
 
+    /// For an upload the bucket refused because something is at its key. What's there is added to
+    /// the listing, so the next pass compares it with the photo and adopts this phone's own earlier
+    /// upload rather than giving the photo a new name. Then the file is put back to be sent.
+    static func uploadRefused(_ resourceID: String) async {
+        guard let sent = store.uploadDestination(ofResource: resourceID),
+              let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3),
+              sent.bucket == identity(client: client, prefix: settings.prefix)
+        else {
+            // Sent to a bucket that isn't the one chosen now, whose listing isn't kept.
+            store.retirePaths(forResource: resourceID)
+            return
+        }
+        let session = settings.bucketSession()
+        defer { session.finishTasksAndInvalidate() }
+        do {
+            guard let size = try await client.headObject(key: LibraryPath.key(prefix: settings.prefix, path: sent.path), session: session) else {
+                Log.upload.info("Upload refused, but nothing is at \(sent.path, privacy: .public) now: it's sent again")
+                store.resetToPending(resourceID)
+                return
+            }
+            if store.addInventory(source: .s3, entries: [InventoryEntry(source: .s3, path: sent.path, size: size)]) {
+                Log.upload.info("Upload refused: \(sent.path, privacy: .public) is taken (\(size) bytes), added to the listing")
+            }
+            store.retirePaths(forResource: resourceID)
+        } catch is URLError {
+            // Couldn't reach the bucket, so nothing is known about what's there. The same name is
+            // tried again, and refused again if it's still taken.
+            Log.upload.error("Couldn't look at \(sent.path, privacy: .public) after its upload was refused: it's sent again")
+            store.resetToPending(resourceID)
+        } catch {
+            Log.upload.error("Couldn't look at \(sent.path, privacy: .public) after its upload was refused: \(error)")
+            store.retirePaths(forResource: resourceID)
+        }
+    }
+
     /// For an upload turned away for asking, which means the last answer for the bucket it was
-    /// sent to is out of date.
+    /// sent to is out of date. Said once for each bucket, not for every upload turned away.
     static func recheckConditionalWrites(afterUploadOf resourceID: String) {
         if let bucket = store.requestConditionalWritesRecheck(afterUploadOf: resourceID) {
             Log.upload.info("Upload refused for asking: \(bucket, privacy: .public) will be asked about conditional writes again")
