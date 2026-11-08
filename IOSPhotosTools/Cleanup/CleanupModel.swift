@@ -117,7 +117,7 @@ final class CleanupModel {
         }
 
         let started = Date()
-        let library = Self.fetchPhotos()
+        let library = await LibrarySnapshot.current().burstShots()
         var cached = AnalysisStore.shared.all()
         let libraryIDs = Set(library.map(\.localIdentifier))
         AnalysisStore.shared.remove(Array(Set(cached.keys).union(kept).subtracting(libraryIDs)))
@@ -177,16 +177,5 @@ final class CleanupModel {
         groups = DuplicateGrouper.groups(candidates, options: options)
             .filter { group in group.assetIDs.dropFirst().contains { !kept.contains($0) } }
         marked = Set(groups.flatMap { $0.assetIDs.dropFirst() }).subtracting(kept)
-    }
-
-    /// Visible still photos, including every shot of each burst. Hidden photos are left alone, and
-    /// so are low-res copies synced from storage, which has already been cleaned up.
-    private static func fetchPhotos() -> [PHAsset] {
-        let options = PHFetchOptions()
-        options.includeAllBurstAssets = true
-        options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        var assets: [PHAsset] = []
-        PhotoLibrary.enumerateOwnAssets(PHAsset.fetchAssets(with: options)) { assets.append($0) }
-        return assets
     }
 }

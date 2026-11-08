@@ -159,7 +159,8 @@ struct ContentView: View {
             if settings.autoBackup { BackupEngine.start() }
             if settings.tripAlbums { TripsModel.shared.start() }
         } else {
-            status.refresh()
+            // The app becoming active has just listed the library.
+            status.refresh(relist: false)
         }
     }
 }

@@ -106,8 +106,7 @@ actor BackupEngine {
         }
         await reconcileWithUploadSession()
 
-        let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedAssets())
-        store.setLibraryAssets(libraryIDs)
+        let pending = await LibrarySnapshot.current().pending(completed: store.completedAssets())
         store.forgetResourcesOfMissingAssets()
         await MainActor.run { BackupStatus.shared.refreshCounts() }
 
@@ -160,8 +159,10 @@ actor BackupEngine {
     }
 
     /// Returns an error if the asset's files couldn't be given paths, so it's tried again next pass.
-    private func stage(_ asset: PHAsset, client: S3Client, settings: SettingsStore.Snapshot, conditionalWrites: Bool) async -> Error? {
-        let assetID = asset.localIdentifier
+    private func stage(_ listed: PHAsset, client: S3Client, settings: SettingsStore.Snapshot, conditionalWrites: Bool) async -> Error? {
+        let assetID = listed.localIdentifier
+        // The snapshot's copy may predate an edit; what's exported and recorded is the current one.
+        guard let asset = PhotoLibrary.freshAsset(assetID) else { return nil }
         let modifiedAt = asset.modificationDate?.timeIntervalSince1970
         let resources: [(PHAssetResource, ResourceRow)]
         do {

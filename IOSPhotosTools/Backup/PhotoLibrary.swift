@@ -20,7 +20,8 @@ enum PhotoLibrary {
         }
     }
 
-    /// Every photo and video in the library, newest first.
+    /// Every photo and video in the library, newest first. Only `LibrarySnapshot` and the scan for
+    /// imports list it.
     static func fetchAllAssets() -> PHFetchResult<PHAsset> {
         let options = PHFetchOptions()
         options.includeAllBurstAssets = true
@@ -29,36 +30,16 @@ enum PhotoLibrary {
         return PHAsset.fetchAssets(with: options)
     }
 
-    /// Calls `body` with each of `assets` except the low-res copies imported from storage.
-    static func enumerateOwnAssets(_ assets: PHFetchResult<PHAsset>, _ body: @escaping (PHAsset) -> Void) {
-        let imported = BackupStore.shared.importedAssetIDs()
-        assets.enumerateObjects { asset, _, _ in
-            if !imported.contains(asset.localIdentifier) { body(asset) }
-        }
-    }
-
     /// Full access, which syncing to the phone needs: with limited access imported photos can't
     /// all be seen, so they'd be imported again.
     static var hasFullAccess: Bool {
         PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized
     }
 
-    /// Assets that need backing up, given `completed` (asset ID → the asset's modification date
-    /// when it was backed up), and the IDs of every asset in the library that gets backed up.
-    /// Low-res copies imported from storage are left out of both.
-    ///
-    /// New assets are included, plus completed ones modified since (e.g. edited) so new edits are
-    /// backed up, and ones whose date is unknown.
-    static func pendingAssets(completed: [String: Double?]) -> (pending: [PHAsset], allIDs: [String]) {
-        var pending: [PHAsset] = []
-        var ids: [String] = []
-        enumerateOwnAssets(fetchAllAssets()) { asset in
-            ids.append(asset.localIdentifier)
-            guard let backedUpAt = completed[asset.localIdentifier] else { return pending.append(asset) }
-            if let backedUpAt, let modified = asset.modificationDate?.timeIntervalSince1970, modified <= backedUpAt { return }
-            pending.append(asset)
-        }
-        return (pending, ids)
+    /// `id`'s asset as it is now. A pass reads the modification date it records from this, before
+    /// exporting, not from the library snapshot, which may be older than an edit made since.
+    static func freshAsset(_ id: String) -> PHAsset? {
+        PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject
     }
 
     /// The tag on a photo imported from storage, if these are the files of one.

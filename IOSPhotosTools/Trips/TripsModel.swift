@@ -79,9 +79,12 @@ final class TripsModel {
         phase = "Looking for trips…"
         defer { isSyncing = false }
 
+        let snapshot = await LibrarySnapshot.current()
         let (found, modified) = await Task.detached {
-            let library = Self.fetchLibrary()
-            return (TripDetector.trips(library.photos, now: Date()), library.modified)
+            let library = snapshot.tripPhotos()
+            let trips = TripDetector.trips(library.photos, now: Date())
+            Log.library.info("Trips: \(trips.count) from \(library.photos.count) photos")
+            return (trips, library.modified)
         }.value
         match(found)
 
@@ -431,23 +434,5 @@ final class TripsModel {
             dates[asset.localIdentifier] = asset.modificationDate?.timeIntervalSince1970
         }
         return dates
-    }
-
-    /// Every visible photo's date and place, skipping screenshots and low-res copies synced from
-    /// storage. Bursts count once.
-    nonisolated private static func fetchLibrary() -> (photos: [TripPhoto], modified: [String: Double]) {
-        let options = PHFetchOptions()
-        options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        var photos: [TripPhoto] = []
-        var modified: [String: Double] = [:]
-        PhotoLibrary.enumerateOwnAssets(PHAsset.fetchAssets(with: options)) { asset in
-            guard let date = asset.creationDate, !asset.mediaSubtypes.contains(.photoScreenshot) else { return }
-            let coordinate = asset.location.map {
-                Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)
-            }
-            photos.append(TripPhoto(id: asset.localIdentifier, date: date, coordinate: coordinate))
-            modified[asset.localIdentifier] = asset.modificationDate?.timeIntervalSince1970
-        }
-        return (photos, modified)
     }
 }

@@ -118,8 +118,7 @@ actor DriveBackupEngine {
         defer { DriveDestination.close(root) }
 
         await report(phase: "Checking library…", running: true, startingPass: true)
-        let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedDriveAssets(driveID: driveID))
-        store.setLibraryAssets(libraryIDs)
+        let pending = await LibrarySnapshot.current().pending(completed: store.completedDriveAssets(driveID: driveID))
         listingSteps = 0
         setProgress(0, of: pending.count)
 
@@ -213,7 +212,9 @@ actor DriveBackupEngine {
 
     /// Copies the asset's files that aren't on the drive yet, plus its edited versions (which keep
     /// their name when re-edited). Returns the first error, if any.
-    private func copy(_ asset: PHAsset, to root: URL, driveID: String) async -> Error? {
+    private func copy(_ listed: PHAsset, to root: URL, driveID: String) async -> Error? {
+        // The snapshot's copy may predate an edit; what's copied and recorded is the current one.
+        guard let asset = PhotoLibrary.freshAsset(listed.localIdentifier) else { return nil }
         let fm = FileManager.default
         var firstError: Error?
         let resources: [(PHAssetResource, ResourceRow)]

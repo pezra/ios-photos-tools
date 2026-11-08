@@ -8,6 +8,8 @@ struct IOSPhotosToolsApp: App {
     @State private var settings: SettingsStore
     @State private var drive = DriveStatus.shared
     @State private var sync = SyncStatus.shared
+    /// Set when the app goes to the background, so that coming back lists the library again.
+    @State private var wasInBackground = false
 
     init() {
         #if DEBUG
@@ -27,12 +29,16 @@ struct IOSPhotosToolsApp: App {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
-                status.refresh()
+                // A new launch has nothing listed yet. Coming back from the background lists the library
+                // again, once for everything that starts now.
+                status.refresh(relist: wasInBackground)
+                wasInBackground = false
                 // A backup pass ends by syncing, so that new backups count as dealt with first.
                 if settings.autoBackup { BackupEngine.start() } else { LibrarySyncEngine.start() }
                 if settings.tripAlbums { TripsModel.shared.start() }
                 DriveMonitor.shared.start()
             case .background:
+                wasInBackground = true
                 DriveMonitor.shared.stop()
                 BackgroundTasks.schedule()
             default:

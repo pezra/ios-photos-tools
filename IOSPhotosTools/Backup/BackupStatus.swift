@@ -32,20 +32,17 @@ final class BackupStatus {
             .flatMap { try? JSONDecoder().decode(BackupStore.Coverage.self, from: $0) } ?? BackupStore.Coverage()
     }
 
-    /// Re-lists the library (e.g. after photos were added or deleted) and refreshes the counts.
-    func refresh() {
+    /// Lists the library again (e.g. after photos were added or deleted) and refreshes the counts.
+    /// `relist: false` keeps the library as listed for this activation.
+    func refresh(relist: Bool = true) {
+        if relist { LibrarySnapshot.invalidate() }
         authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         refreshCounts()
         guard !listingLibrary else { return }
         listingLibrary = true
-        let authorized = PhotoLibrary.isAuthorized
         // Listing a large library takes a moment, so it's done off the main thread.
         Task.detached(priority: .utility) {
-            var ids: [String] = []
-            if authorized {
-                PhotoLibrary.enumerateOwnAssets(PhotoLibrary.fetchAllAssets()) { ids.append($0.localIdentifier) }
-            }
-            BackupStore.shared.setLibraryAssets(ids)
+            _ = await LibrarySnapshot.current()
             await MainActor.run {
                 let status = BackupStatus.shared
                 status.listingLibrary = false

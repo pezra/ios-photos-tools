@@ -40,6 +40,8 @@ enum BackgroundTasks {
 
     private static func handle(_ task: BGProcessingTask) {
         Log.background.info("Background backup started")
+        // A background run is an activation of its own, and the next foreground one lists again.
+        LibrarySnapshot.invalidate()
         schedule()
         task.expirationHandler = {
             Log.background.info("Background backup expired")
@@ -53,6 +55,7 @@ enum BackgroundTasks {
             await BackupEngine.shared.run()
             await drive
             await LibrarySyncEngine.shared.run()
+            LibrarySnapshot.invalidate()
             task.setTaskCompleted(success: true)
             Log.background.info("Background backup completed")
         }
@@ -68,11 +71,13 @@ enum BackgroundTasks {
 
     private static func handleTrips(_ task: BGProcessingTask) {
         scheduleTrips()
+        LibrarySnapshot.invalidate()
         task.expirationHandler = {
             Task { @MainActor in TripsModel.shared.stop() }
         }
         Task { @MainActor in
             await TripsModel.shared.syncNow()
+            LibrarySnapshot.invalidate()
             task.setTaskCompleted(success: true)
         }
     }

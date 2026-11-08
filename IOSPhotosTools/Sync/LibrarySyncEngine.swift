@@ -228,6 +228,8 @@ actor LibrarySyncEngine {
         }
         if cancelled { throw CancellationError() }
         guard store.replaceImportedAssets(found) else { throw BackupStore.Failure.couldNotSave }
+        // The snapshot may list these copies as the user's own photos.
+        LibrarySnapshot.invalidate()
 
         let tags = Set(found.map(\.tag))
         let importedPaths = store.inventory().map(\.path).filter { tags.contains(LibraryPath.tag(for: $0)) }
