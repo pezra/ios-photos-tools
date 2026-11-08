@@ -195,7 +195,7 @@ actor BackupEngine {
             let isOwn = plan.isOwn
             // Already at its own path in the bucket, as when reinstalling loses the upload history.
             if isOwn && !isEdit && inBucket != nil {
-                store.markDone(row.id, sha256: previous?.sha256)
+                store.markDone(row.id, path: row.path, sha256: previous?.sha256)
                 continue
             }
 
@@ -223,7 +223,7 @@ actor BackupEngine {
                 }
                 if matches == true {
                     Staging.remove(stagedName)
-                    store.markDone(row.id, sha256: sha256)
+                    store.markDone(row.id, path: row.path, sha256: sha256)
                     continue
                 }
                 // Unless it's this photo's own older edit, which gets replaced, nothing is sent:
@@ -240,8 +240,13 @@ actor BackupEngine {
                 }
             }
             let url = client.presignedURL(method: "PUT", key: row.s3Key, expiresIn: urlLifetime)
-            store.markUploading(row.id, path: row.path, bucket: StorageInventory.identity(client: client, prefix: settings.prefix),
-                                stagedName: stagedName, sha256: sha256)
+            // The drive pass may have given the photo new paths since they were assigned here.
+            guard store.markUploading(row.id, path: row.path, bucket: StorageInventory.identity(client: client, prefix: settings.prefix),
+                                      stagedName: stagedName, sha256: sha256) else {
+                Log.upload.info("Not uploading \(row.id, privacy: .public): its path changed while staging")
+                Staging.remove(stagedName)
+                continue
+            }
             UploadSession.shared.upload(
                 file: file,
                 to: url,

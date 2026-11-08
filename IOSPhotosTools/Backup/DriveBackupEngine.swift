@@ -232,7 +232,7 @@ actor DriveBackupEngine {
                         store.retirePaths(forAsset: asset.localIdentifier)
                         return BackupPaths.Failure.nameTaken(row.path)
                     }
-                    store.markOnDrive(row.path)
+                    store.markOnDrive(row.path, resource: row.id)
                 } catch {
                     if Task.isCancelled { return nil }
                     firstError = firstError ?? error
@@ -248,7 +248,7 @@ actor DriveBackupEngine {
                 guard rename(partial.path, destination.path) == 0 else {
                     throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
-                store.markOnDrive(row.path)
+                store.markOnDrive(row.path, resource: row.id)
             } catch {
                 try? fm.removeItem(at: partial)
                 // Pausing interrupts the file being copied; that isn't a failure.
@@ -256,10 +256,12 @@ actor DriveBackupEngine {
                 firstError = firstError ?? error
             }
         }
-        // The drive may have been switched or removed in settings since the pass started.
+        // The drive may have been switched or removed in settings since the pass started. Not
+        // complete either if the bucket pass gave the photo new paths meanwhile: it's copied to
+        // those next time.
         if firstError == nil && !Task.isCancelled && DriveDestination.id == driveID {
             store.markDriveAssetComplete(asset.localIdentifier, driveID: driveID,
-                                         modifiedAt: asset.modificationDate?.timeIntervalSince1970)
+                                         modifiedAt: asset.modificationDate?.timeIntervalSince1970, files: resources.map(\.1))
         }
         return firstError
     }

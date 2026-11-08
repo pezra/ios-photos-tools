@@ -221,22 +221,31 @@ public final class BackupStore: @unchecked Sendable {
         }
     }
 
-    /// `path` and `bucket` are where the upload is going.
-    public func markUploading(_ id: String, path: String, bucket: String, stagedName: String, sha256: String?) {
+    /// `path` and `bucket` are where the upload is going. Returns false, changing nothing, if the
+    /// file has been forgotten or no longer holds `path` (another pass gave its photo new paths),
+    /// in which case it mustn't be uploaded.
+    public func markUploading(_ id: String, path: String, bucket: String, stagedName: String, sha256: String?) -> Bool {
         locked {
+            guard holds(id, path) else { return false }
             execute("""
                 UPDATE resources SET state = ?, staged_name = ?, sha256 = ?, superseded = 0, upload_path = ?, upload_bucket = ?, updated_at = ?
                 WHERE id = ?
                 """, [ResourceState.uploading.rawValue, stagedName, sha256, path, bucket, now, id])
+            return true
         }
     }
 
-    /// For an upload that has finished. It only counts for the path it was sent to.
+    /// For an upload that has finished. It only counts for the path it was sent to: if the file no
+    /// longer holds that path, it's put back to be sent to its new one.
     public func markDone(_ id: String) {
         locked {
             guard !resetSuperseded(id) else { return }
             guard let path = query("SELECT upload_path FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
-            done(id, path: path)
+            guard done(id, path: path) else {
+                execute("UPDATE resources SET state = ?, staged_name = NULL, updated_at = ? WHERE id = ? AND state = ?",
+                        [ResourceState.pending.rawValue, now, id, ResourceState.uploading.rawValue])
+                return
+            }
         }
     }
 
@@ -344,10 +353,15 @@ public final class BackupStore: @unchecked Sendable {
         locked { modifiedDates("SELECT asset_id, modified_at FROM drive_assets WHERE drive_id = ?", [driveID]) }
     }
 
-    public func markDriveAssetComplete(_ assetID: String, driveID: String, modifiedAt: Double?) {
+    /// `files` are the asset's files that were copied, at their paths. Returns false, changing
+    /// nothing, if any of them no longer holds its path.
+    @discardableResult
+    public func markDriveAssetComplete(_ assetID: String, driveID: String, modifiedAt: Double?, files: [ResourceRow]) -> Bool {
         locked {
+            guard files.allSatisfy({ holds($0.id, $0.path) }) else { return false }
             execute("INSERT OR REPLACE INTO drive_assets (drive_id, asset_id, completed_at, modified_at) VALUES (?, ?, ?, ?)",
                     [driveID, assetID, now, modifiedAt])
+            return true
         }
     }
 
@@ -450,19 +464,26 @@ public final class BackupStore: @unchecked Sendable {
         }
     }
 
-    public func markOnDrive(_ path: String) {
+    /// Records the file of resource `id` as on the drive at `path`. Returns false, changing
+    /// nothing, if the resource no longer holds that path.
+    @discardableResult
+    public func markOnDrive(_ path: String, resource id: String) -> Bool {
         locked {
+            guard holds(id, path) else { return false }
             execute("UPDATE handled_paths SET on_drive = 1 WHERE norm = ? AND on_drive = 0", [LibraryPath.normalized(path)])
             if sqlite3_changes(db) > 0 { bumpHandledVersion() }
+            return true
         }
     }
 
-    /// Records a file that turned out to be in the bucket already.
-    public func markDone(_ id: String, sha256: String?) {
+    /// Records a file that turned out to be in the bucket already, at `path`. Returns false,
+    /// changing nothing, if the file no longer holds that path.
+    @discardableResult
+    public func markDone(_ id: String, path: String, sha256: String?) -> Bool {
         locked {
-            guard let path = query("SELECT path FROM handled_paths WHERE resource_id = ?", [id], { text($0, 0) }).first ?? nil else { return }
+            guard holds(id, path) else { return false }
             execute("UPDATE resources SET sha256 = ? WHERE id = ?", [sha256, id])
-            done(id, path: path)
+            return done(id, path: path)
         }
     }
 
@@ -727,14 +748,25 @@ public final class BackupStore: @unchecked Sendable {
     /// `path` is where the file is in the bucket. Nothing counts for a file that's been forgotten,
     /// such as by `reset` between registering and uploading it, so what's at its path isn't taken
     /// for the photo's own.
-    private func done(_ id: String, path: String) {
-        guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
+    /// Whether resource `id` is on record and still holds `path`.
+    private func holds(_ id: String, _ path: String) -> Bool {
+        holder(ofPath: path) == .resource(id)
+            && !query("SELECT 1 FROM resources WHERE id = ?", [id], { _ in true }).isEmpty
+    }
+
+    /// Returns false, changing nothing, if the resource has been forgotten or no longer holds `path`.
+    @discardableResult
+    private func done(_ id: String, path: String) -> Bool {
+        guard holds(id, path),
+              let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil
+        else { return false }
         execute("UPDATE resources SET state = ?, staged_name = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
                 [ResourceState.done.rawValue, now, id])
         execute("UPDATE handled_paths SET on_bucket = 1 WHERE norm = ? AND resource_id = ? AND on_bucket = 0",
                 [LibraryPath.normalized(path), id])
         if sqlite3_changes(db) > 0 { bumpHandledVersion() }
         completeAssetIfFinished(assetID)
+        return true
     }
 
     /// Asset IDs mapped to the modification dates in the second column, which may be null.

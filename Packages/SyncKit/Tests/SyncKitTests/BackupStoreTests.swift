@@ -42,7 +42,7 @@ final class BackupStoreTests: XCTestCase {
     /// Starts uploads to the paths the files hold now.
     private func upload(_ ids: String...) {
         for id in ids {
-            let path = store.paths(forAsset: ResourceRow.assetID(ofResource: id))[id] ?? ""
+            let path = store.handledEntries().first { $0.resourceID == id }?.path ?? ""
             store.markUploading(id, path: path, bucket: "svc/A/p", stagedName: "staged-\(id)", sha256: nil)
         }
     }
@@ -118,6 +118,58 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertEqual(state("d", "d#1"), .done)
     }
 
+    // MARK: - The bucket and drive passes working on one photo
+
+    func testNewPathsBetweenAssigningAndUploadingMarkNothing() {
+        open()
+        let old = [row("a#1", "a", "2026/A.HEIC"), row("a#9", "a", "2026/A.MOV")]
+        add(old, asset: "a")
+        // The other pass finds something else at one of the paths.
+        store.retirePaths(forAsset: "a")
+        XCTAssertTrue(store.claim([row("a#1", "a", "2026/A (1).HEIC"), row("a#9", "a", "2026/A (1).MOV")]))
+
+        XCTAssertFalse(store.markUploading("a#1", path: "2026/A.HEIC", bucket: "svc/A/p", stagedName: "s", sha256: nil))
+        XCTAssertEqual(state("a", "a#1"), .pending)
+        XCTAssertFalse(store.markDone("a#9", path: "2026/A.MOV", sha256: "x"))
+        XCTAssertEqual(state("a", "a#9"), .pending)
+        XCTAssertFalse(store.markOnDrive("2026/A.HEIC", resource: "a#1"))
+        XCTAssertFalse(store.markDriveAssetComplete("a", driveID: "d", modifiedAt: 5, files: old))
+        store.markAssetCompleteIfFinished("a")
+
+        XCTAssertNil(store.completedAssets()["a"])
+        XCTAssertNil(store.completedDriveAssets(driveID: "d")["a"])
+        for path in ["2026/A.HEIC", "2026/A.MOV", "2026/A (1).HEIC", "2026/A (1).MOV"] {
+            XCTAssertFalse(store.isInBucket(path), path)
+            XCTAssertFalse(store.isOnDrive(path), path)
+        }
+    }
+
+    func testUploadFinishingAfterItsPathChangedIsSentAgain() {
+        open()
+        add([row("a#1", "a", "2026/A.HEIC")], asset: "a")
+        upload("a#1")
+        store.releasePath("2026/A.HEIC")
+        XCTAssertTrue(store.claim([row("a#1", "a", "2026/A (1).HEIC")]))
+        store.markDone("a#1")
+        XCTAssertEqual(state("a", "a#1"), .pending)
+        XCTAssertFalse(store.isInBucket("2026/A.HEIC"))
+        XCTAssertFalse(store.isInBucket("2026/A (1).HEIC"), "never uploaded there")
+        XCTAssertNil(store.completedAssets()["a"])
+    }
+
+    func testMarksAtTheirOwnPaths() {
+        open()
+        let a = [row("a#1", "a", "2026/A.HEIC")]
+        add(a, asset: "a")
+        XCTAssertTrue(store.markOnDrive("2026/A.HEIC", resource: "a#1"))
+        XCTAssertTrue(store.isOnDrive("2026/A.HEIC"))
+        XCTAssertTrue(store.markDriveAssetComplete("a", driveID: "d", modifiedAt: 5, files: a))
+        XCTAssertNotNil(store.completedDriveAssets(driveID: "d")["a"])
+        XCTAssertTrue(store.markDone("a#1", path: "2026/A.HEIC", sha256: nil))
+        XCTAssertTrue(store.isInBucket("2026/A.HEIC"))
+        XCTAssertNotNil(store.completedAssets()["a"])
+    }
+
     // MARK: - Paths
 
     func testPathHolders() {
@@ -135,7 +187,7 @@ final class BackupStoreTests: XCTestCase {
         add([row("e#1", "e", "2026/E.HEIC")], asset: "e")
         upload("e#1")
         store.markDone("e#1")
-        store.markOnDrive("2026/E.HEIC")
+        store.markOnDrive("2026/E.HEIC", resource: "e#1")
         store.retirePaths(forAsset: "e")
         XCTAssertFalse(store.isInBucket("2026/E.HEIC"))
         XCTAssertFalse(store.isOnDrive("2026/E.HEIC"))
@@ -481,8 +533,8 @@ final class BackupStoreTests: XCTestCase {
         store.setLibraryAssets(["a", "b", "c"])
         store.markAssetComplete("a", modifiedAt: 1)
         store.markAssetComplete("gone", modifiedAt: 1)
-        store.markDriveAssetComplete("a", driveID: "d", modifiedAt: 1)
-        store.markDriveAssetComplete("b", driveID: "d", modifiedAt: 1)
+        store.markDriveAssetComplete("a", driveID: "d", modifiedAt: 1, files: [])
+        store.markDriveAssetComplete("b", driveID: "d", modifiedAt: 1, files: [])
         let coverage = store.coverage(driveID: "d")
         XCTAssertEqual(coverage, BackupStore.Coverage(total: 3, cloud: 1, drive: 2, both: 1))
         XCTAssertEqual(coverage?.driveOnly, 1)
