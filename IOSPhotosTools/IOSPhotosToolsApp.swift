@@ -5,9 +5,16 @@ struct IOSPhotosToolsApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
     @State private var status = BackupStatus.shared
-    @State private var settings = SettingsStore()
+    @State private var settings: SettingsStore
     @State private var drive = DriveStatus.shared
     @State private var sync = SyncStatus.shared
+
+    init() {
+        #if DEBUG
+        TestHooks.apply()
+        #endif
+        _settings = State(initialValue: SettingsStore())
+    }
 
     var body: some Scene {
         WindowGroup {
