@@ -59,6 +59,14 @@ final class DriveListingTests: XCTestCase {
         XCTAssertEqual(listed, ["2019/a.jpg", "2019/b.jpg", "2019/c.jpg", "2019/d.jpg", "2019/e.jpg", "2020/f.jpg"])
     }
 
+    func testProgressIsReportedBetweenSaves() async throws {
+        try write("2019/a.jpg", "2019/b.jpg", "2019/c.jpg", "2019/d.jpg")
+        var reports: [Int] = []
+        try await DriveListing(store: store, root: drive, key: "listing", batchSize: 500, reportEvery: 2)
+            .run(freshFor: 0) { reports.append($0) }
+        XCTAssertEqual(reports, [0, 2, 4, 4])
+    }
+
     func testFinishedListingForgetsWhatsGone() async throws {
         try write("top.jpg", "2019/a.jpg", "2019/b.jpg", "2020/c.jpg")
         try await listing().run(freshFor: 0)

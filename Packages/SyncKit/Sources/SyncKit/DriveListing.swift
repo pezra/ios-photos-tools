@@ -29,13 +29,17 @@ public struct DriveListing {
     private let root: URL
     private let key: String
     private let batchSize: Int
+    /// Progress is reported this often, more often than it's saved, so a continued task's progress
+    /// keeps moving even where reading each file's details is slow.
+    private let reportEvery: Int
 
     /// `key` names where the listing keeps its place in the store.
-    public init(store: BackupStore, root: URL, key: String, batchSize: Int = 500) {
+    public init(store: BackupStore, root: URL, key: String, batchSize: Int = 500, reportEvery: Int = 25) {
         self.store = store
         self.root = root
         self.key = key
         self.batchSize = batchSize
+        self.reportEvery = reportEvery
     }
 
     /// Lists the drive, unless a listing finished within `freshFor` seconds. `progress` is told how
@@ -101,6 +105,8 @@ public struct DriveListing {
                     try save(after: name)
                     await progress?(state.found)
                     try Task.checkCancellation()
+                } else if (index + 1) % reportEvery == 0 {
+                    await progress?(state.found + batch.count)
                 }
             }
             try checkReachable()

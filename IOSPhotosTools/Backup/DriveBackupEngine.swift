@@ -19,9 +19,18 @@ actor DriveBackupEngine {
     /// Set while iOS is letting the pass continue in the background; shows progress to the user.
     private var continuedTask: BGContinuedProcessingTask?
     private var progress = (done: 0, total: 0)
-    /// Files listed so far this pass. iOS ends a continued task whose progress stops moving, and
-    /// listing a big drive or bucket takes minutes, so these count as work done.
-    private var listed = (drive: 0, bucket: 0)
+    /// Steps of reading the drive and listing the bucket this pass, which count as work done.
+    private var listingSteps = 0
+    /// iOS ends a continued task whose progress hasn't moved for a while (about 30 seconds, going
+    /// by other developers' reports). Copying a big video, or downloading it from iCloud first, can
+    /// take longer than that, so while there's a task its progress is nudged along within the
+    /// current step. A step that outlasts the nudges is left to look stalled.
+    private var nudges = 0
+    private var heartbeat: Task<Void, Never>?
+    private static let unitsPerStep: Int64 = 100
+    private static let nudgeInterval: Duration = .seconds(5)
+    /// Set while the pass is syncing the phone's copies, which runs as its own pass.
+    private var isSyncing = false
 
     /// Starts a pass if one isn't running. Called from the foreground, it also asks iOS to let the
     /// pass carry on when the app is closed.
@@ -45,25 +54,45 @@ actor DriveBackupEngine {
 
     func cancel() {
         currentPass?.cancel()
+        if isSyncing { LibrarySyncEngine.stop() }
     }
 
-    func attach(_ task: BGContinuedProcessingTask) {
+    /// Shows the pass in progress under `task` and waits for it to end. Returns at once if that
+    /// pass has already ended, rather than starting another, or if another task is showing it.
+    func follow(_ task: BGContinuedProcessingTask) async {
+        guard let currentPass, continuedTask == nil else { return }
         continuedTask = task
-        setProgress(progress.done, of: progress.total)
+        showProgress()
+        heartbeat = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.nudgeInterval)
+                nudge()
+            }
+        }
+        await currentPass.value
     }
 
     private func setProgress(_ done: Int, of total: Int) {
         progress = (done, total)
-        let offset = listed.drive + listed.bucket
-        continuedTask?.progress.totalUnitCount = Int64(offset + total)
-        continuedTask?.progress.completedUnitCount = Int64(offset + done)
+        nudges = 0
+        showProgress()
     }
 
-    private func showListing(drive: Int? = nil, bucket: Int? = nil) async {
-        if let drive { listed.drive = drive }
-        if let bucket { listed.bucket = bucket }
+    private func nudge() {
+        guard nudges < Self.unitsPerStep - 1 else { return }
+        nudges += 1
+        showProgress()
+    }
+
+    /// The extra step in the total leaves room for nudges once everything's counted as done.
+    private func showProgress() {
+        continuedTask?.progress.totalUnitCount = Int64(listingSteps + progress.total + 1) * Self.unitsPerStep
+        continuedTask?.progress.completedUnitCount = Int64(listingSteps + progress.done) * Self.unitsPerStep + Int64(nudges)
+    }
+
+    private func showListing(_ phase: String) async {
+        listingSteps += 1
         setProgress(progress.done, of: progress.total)
-        let phase = bucket.map { "Listing bucket… \($0.formatted()) files" } ?? "Reading drive… \(listed.drive.formatted()) files"
         await report(phase: phase, running: true)
     }
 
@@ -71,6 +100,9 @@ actor DriveBackupEngine {
         if let currentPass { return (currentPass, false) }
         let pass = Task {
             await performPass()
+            heartbeat?.cancel()
+            heartbeat = nil
+            continuedTask = nil
             currentPass = nil
         }
         currentPass = pass
@@ -92,13 +124,14 @@ actor DriveBackupEngine {
         await report(phase: "Checking library…", running: true, startingPass: true)
         let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedDriveAssets(driveID: driveID))
         store.setLibraryAssets(libraryIDs)
-        listed = (0, 0)
+        listingSteps = 0
         setProgress(0, of: pending.count)
 
-        // Names are checked against what's on the drive and in the bucket so nothing is overwritten.
-        if !pending.isEmpty {
+        // Names are checked against what's on the drive and in the bucket so nothing is overwritten,
+        // and the sync at the end needs the drive's listing too.
+        if !pending.isEmpty || SettingsStore.syncEnabled {
             do {
-                try await prepareInventory(root: root, driveID: driveID)
+                try await prepareInventory(root: root, driveID: driveID, includingBucket: !pending.isEmpty)
             } catch {
                 return await report(phase: Task.isCancelled ? "Paused" : "Couldn't check what's in storage", running: false,
                                     error: Task.isCancelled ? nil : error.localizedDescription)
@@ -134,34 +167,35 @@ actor DriveBackupEngine {
         await report(phase: phase, running: false, error: lastError, finished: !Task.isCancelled && !disconnected)
 
         if !Task.isCancelled && !disconnected {
+            isSyncing = true
             await LibrarySyncEngine.shared.run { phase, done, total in
                 Task { await DriveBackupEngine.shared.showSyncProgress(phase, done: done, total: total) }
             }
+            isSyncing = false
         }
-        continuedTask = nil
     }
 
     private func showSyncProgress(_ phase: String, done: Int, total: Int) {
         continuedTask?.updateTitle(DriveBackgroundTask.syncTitle, subtitle: phase)
-        listed = (0, 0)
+        listingSteps = 0
         setProgress(done, of: total)
     }
 
     /// Off the actor because walking the drive takes a while, and pausing has to be able to get through.
-    private nonisolated func prepareInventory(root: URL, driveID: String) async throws {
-        await showListing(drive: 0)
+    private nonisolated func prepareInventory(root: URL, driveID: String, includingBucket: Bool) async throws {
+        await showListing("Reading drive…")
         try await StorageInventory.prepareDrive(root: root, driveID: driveID) { found in
-            await self.showListing(drive: found)
+            await self.showListing("Reading drive… \(found.formatted()) files")
         }
         // The bucket's last listing will do if it can't be reached now, but there must be one.
-        guard let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3),
+        guard includingBucket, let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3),
               !StorageInventory.hasListedS3(client: client, prefix: settings.prefix)
         else { return }
         let session = settings.bucketSession()
         defer { session.finishTasksAndInvalidate() }
-        await showListing(bucket: 0)
+        await showListing("Listing bucket…")
         try await StorageInventory.prepareS3(client: client, prefix: settings.prefix, session: session) { listed in
-            await self.showListing(bucket: listed)
+            await self.showListing("Listing bucket… \(listed.formatted()) files")
         }
     }
 
@@ -274,8 +308,7 @@ enum DriveBackgroundTask {
                 LibrarySyncEngine.stop()
             }
             Task {
-                await DriveBackupEngine.shared.attach(task)
-                await DriveBackupEngine.shared.run()
+                await DriveBackupEngine.shared.follow(task)
                 task.setTaskCompleted(success: true)
             }
         }
