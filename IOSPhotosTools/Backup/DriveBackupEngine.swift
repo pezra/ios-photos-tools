@@ -29,8 +29,6 @@ actor DriveBackupEngine {
     private var heartbeat: Task<Void, Never>?
     private static let unitsPerStep: Int64 = 100
     private static let nudgeInterval: Duration = .seconds(5)
-    /// Set while the pass is syncing the phone's copies, which runs as its own pass.
-    private var isSyncing = false
 
     /// Starts a pass if one isn't running. Called from the foreground, it also asks iOS to let the
     /// pass carry on when the app is closed.
@@ -47,14 +45,14 @@ actor DriveBackupEngine {
         Task { await shared.cancel() }
     }
 
-    /// Runs a pass (or joins the one in progress) and waits for it to finish.
+    /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
+    /// stops the pass.
     func run() async {
-        await startPass().task.value
+        await withTaskCancellationHandler { await startPass().task.value } onCancel: { Self.stop() }
     }
 
     func cancel() {
         currentPass?.cancel()
-        if isSyncing { LibrarySyncEngine.stop() }
     }
 
     /// Shows the pass in progress under `task` and waits for it to end. Returns at once if that
@@ -166,12 +164,11 @@ actor DriveBackupEngine {
             : "Up to date"
         await report(phase: phase, running: false, error: lastError, finished: !Task.isCancelled && !disconnected)
 
+        // Pausing this pass stops the sync too, since it's waited for here.
         if !Task.isCancelled && !disconnected {
-            isSyncing = true
             await LibrarySyncEngine.shared.run { phase, done, total in
                 Task { await DriveBackupEngine.shared.showSyncProgress(phase, done: done, total: total) }
             }
-            isSyncing = false
         }
     }
 

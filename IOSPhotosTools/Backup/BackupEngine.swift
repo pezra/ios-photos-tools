@@ -28,9 +28,10 @@ actor BackupEngine {
         Task { await shared.cancel() }
     }
 
-    /// Runs a pass (or joins the one in progress) and waits for it to finish.
+    /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
+    /// stops the pass.
     func run() async {
-        await startPass().value
+        await withTaskCancellationHandler { await startPass().value } onCancel: { Self.stop() }
     }
 
     func cancel() {

@@ -39,10 +39,11 @@ actor LibrarySyncEngine {
         Task { await shared.cancel() }
     }
 
-    /// Runs a pass (or joins the one in progress) and waits for it to finish.
+    /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
+    /// stops the pass.
     func run(onProgress: (@Sendable (String, Int, Int) -> Void)? = nil) async {
         if let onProgress { progressHandler = onProgress }
-        await startPass().value
+        await withTaskCancellationHandler { await startPass().value } onCancel: { Self.stop() }
         progressHandler = nil
     }
 
