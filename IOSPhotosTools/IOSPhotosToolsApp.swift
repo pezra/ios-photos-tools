@@ -35,6 +35,7 @@ struct IOSPhotosToolsApp: App {
                 status.refresh(relist: wasInBackground)
                 wasInBackground = false
                 BackupRun.start(.opened, because: "app opened")
+                BackupRun.opened()
                 if settings.tripAlbums { TripsModel.shared.start() }
                 DriveMonitor.shared.start()
             case .background:

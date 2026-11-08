@@ -43,6 +43,27 @@ final class BackupRun: @unchecked Sendable {
         ContinuedRunTask.requestIfNeeded()
     }
 
+    /// The app becoming active with the drive attached counts as plugging it in, when there are
+    /// photos to copy: the opening run gets a continued task, or keeps the one it has. Called
+    /// straight after the opening run starts, from the activation itself.
+    @MainActor static func opened() {
+        let setup = Situation.now().setup
+        // Nothing is asked of the drive, or the store, unless a drive is set up and switched on.
+        guard setup.drive, setup.driveAutoBackup, DriveDestination.isConnected, let driveID = DriveDestination.id else { return }
+        // The library hasn't been listed yet, so go by counts: what's in it, less the low-res copies
+        // left out of the backup, less what the drive has. Photos edited since are missed.
+        let store = BackupStore.shared
+        let inLibrary = PhotoLibrary.isAuthorized ? PhotoLibrary.fetchAllAssets().count : 0
+        let imported = store.importedAssetIDs().count
+        let onDrive = store.completedDriveAssets(driveID: driveID).count
+        let uncopied = inLibrary - imported - onDrive
+        Log.run.info("Opened with the drive attached: about \(max(uncopied, 0)) to copy (\(inLibrary) in the library, \(imported) imported, \(onDrive) on the drive)")
+        guard RunPlan.requestsTaskWhenOpened(setup: setup, driveReachable: true, uncopied: uncopied)
+        else { return Log.run.info("Opened with the drive attached and nothing to copy: no continued task") }
+        start(.user([.drive]), because: "app opened with the drive attached")
+        ContinuedRunTask.requestIfNeeded()
+    }
+
     /// Pauses one row's part of the run. The rest carries on.
     static func pause(_ part: Part) {
         Log.run.info("Pausing \(part.rawValue, privacy: .public)")

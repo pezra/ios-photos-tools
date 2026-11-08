@@ -90,6 +90,14 @@ public enum RunPlan {
         }
     }
 
+    /// Whether the app being opened (or returned to) with the drive attached asks for a continued
+    /// task, which the user has said counts as plugging the drive in. Only when there's something to
+    /// copy. The library hasn't been listed yet at that point, so `uncopied` is an estimate: the
+    /// library's photos, less the low-res copies left out of it, less what the drive has.
+    public static func requestsTaskWhenOpened(setup: Setup, driveReachable: Bool, uncopied: Int) -> Bool {
+        setup.drive && setup.driveAutoBackup && driveReachable && uncopied > 0
+    }
+
     /// The listings a part needs before it starts. `pending` is how many photos it has to do, and
     /// `parts` what the run does.
     ///

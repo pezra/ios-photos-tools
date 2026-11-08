@@ -56,6 +56,22 @@ import Testing
         #expect(parts(.uploadsSettled) == [.bucket])
     }
 
+    @Test func openingWithTheDriveAttachedAsksForATaskOnlyWithPhotosToCopy() {
+        func asks(_ setup: RunPlan.Setup? = nil, reachable: Bool = true, uncopied: Int = 3) -> Bool {
+            RunPlan.requestsTaskWhenOpened(setup: setup ?? everything, driveReachable: reachable, uncopied: uncopied)
+        }
+        #expect(asks())
+        #expect(!asks(uncopied: 0))
+        #expect(!asks(uncopied: -2))
+        #expect(!asks(reachable: false))
+        var noAutoBackup = everything
+        noAutoBackup.driveAutoBackup = false
+        #expect(!asks(noAutoBackup))
+        var noDrive = everything
+        noDrive.drive = false
+        #expect(!asks(noDrive))
+    }
+
     @Test func joiningOnlyAddsWhatWasAskedFor() {
         #expect(RunPlan.joining(.opened, setup: everything) == [])
         #expect(RunPlan.joining(.automatic, setup: everything) == [])

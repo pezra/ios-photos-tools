@@ -502,13 +502,25 @@ sync only gets background time by borrowing a drive pass.
 - A simulated background run lists the bucket once.
 - Tapping "Sync now" with no drive gives a continued task, and the sync carries on after leaving the
   app.
-- Plugging in the drive with the app open gives a continued task. Opening the app with nothing tapped
-  or plugged in shows no system progress notification.
+- Plugging in the drive with the app open gives a continued task. Opening the app with no drive
+  attached, or with the drive attached and nothing to copy, and nothing tapped or plugged in, shows no
+  system progress notification.
+- Opening the app with the drive attached and photos to copy gives a continued task, and copying
+  carries on after leaving the app.
 
 **Risk.** High. It changes when everything runs.
 
 **Decided (user, 2026-11-07).** Plugging the drive in counts as the user's action, so `DriveMonitor`
 noticing the drive while the app is open still requests a continued task, as it does today.
+
+**Decided (user, 2026-11-08).** Opening the app with the drive already attached also counts as
+plugging it in. When the app becomes active (a cold launch or a return from the background) and the
+drive is reachable, its auto-backup is on and there are photos to copy, it requests a continued task
+through the same path as `drivePlugged()` (`BackupRun.opened()`), synchronously in the activation
+handler and attached to the opening run. "Photos to copy" is judged without waiting for the new
+library listing, by counts: the photos in the library, less the imported low-res copies, less what the
+drive has. Nothing
+to copy means no task and no notification.
 
 ---
 

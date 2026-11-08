@@ -4,7 +4,7 @@ import Foundation
 ///
 /// iOS has no notification for USB drives being attached (and won't launch an app for one), so
 /// this polls the drive's bookmark. A drive already there when the app first opens is the opening
-/// run's to copy to; one that's appeared since the app was last open counts as plugged in.
+/// run's to copy to (`BackupRun.opened` gives it a continued task); one that's appeared since the app was last open counts as plugged in.
 @MainActor
 final class DriveMonitor {
     static let shared = DriveMonitor()
