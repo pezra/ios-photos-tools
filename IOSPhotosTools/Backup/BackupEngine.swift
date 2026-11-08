@@ -71,7 +71,7 @@ actor BackupEngine {
         let session = settings.bucketSession()
         defer { session.finishTasksAndInvalidate() }
 
-        await report(phase: "Checking library…", running: true)
+        await report(phase: "Checking library…", running: true, startingPass: !isRetry)
         await reconcileWithUploadSession()
 
         let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedAssets())
@@ -247,12 +247,16 @@ actor BackupEngine {
         Staging.removeOrphans(keeping: Set(store.uploadingResources().compactMap(\.stagedName)))
     }
 
-    private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false) async {
+    /// `startingPass` clears the previous pass's error, which otherwise lingers when that pass
+    /// was paused.
+    private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false) async {
         await MainActor.run {
             let status = BackupStatus.shared
             status.phase = phase
             status.isRunning = running
-            if finished {
+            if startingPass {
+                status.lastError = nil
+            } else if finished {
                 status.lastFinished = Date()
                 status.lastError = error
             } else if let error {
