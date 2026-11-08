@@ -9,8 +9,6 @@ import SyncKit
 /// already there are never lost.
 enum StorageInventory {
     private static var store: BackupStore { .shared }
-    /// How many changes to let build up before updating the copies in storage during a pass.
-    private static let writeInterval = 500
 
     // MARK: - Drive
 
@@ -45,13 +43,13 @@ enum StorageInventory {
     }
 
     /// Writes the record to the drive if it's out of date. `force` writes any change at all;
-    /// otherwise this waits until enough have built up.
+    /// otherwise this waits until 5 minutes have passed since the last write.
     static func writeHandledPaths(toDrive root: URL, driveID: String, force: Bool) async {
         guard store.meta("merged-drive-\(driveID)") != nil else { return }
         let file = root.appending(path: HandledPathsFile.relativePath)
         let partial = file.deletingLastPathComponent().appending(path: ".\(file.lastPathComponent).partial")
         do {
-            let version = try await writer("written-drive-\(driveID)").write(force: force, interval: writeInterval) { data in
+            let version = try await writer("written-drive-\(driveID)").write(force: force) { data in
                 do {
                     try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try data.write(to: partial)
@@ -184,7 +182,7 @@ enum StorageInventory {
         guard store.meta("merged-s3-\(id)") != nil else { return }
         let key = handledKey(prefix: prefix)
         do {
-            let version = try await writer("written-s3-\(id)").write(force: force, interval: writeInterval) { data in
+            let version = try await writer("written-s3-\(id)").write(force: force) { data in
                 try await client.putObject(key: key, data: data, contentType: "application/x-ndjson", session: session)
             }
             if let version { Log.handledPaths.info("Wrote handled paths to the bucket at version \(version)") }

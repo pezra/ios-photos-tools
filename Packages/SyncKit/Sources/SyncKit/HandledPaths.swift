@@ -34,6 +34,7 @@ public enum HandledPathsFile {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         var data = Data()
+        data.reserveCapacity(entries.count * 120)
         for entry in entries.sorted(by: { $0.path < $1.path }) {
             guard let line = try? encoder.encode(entry) else { continue }
             data.append(line)
