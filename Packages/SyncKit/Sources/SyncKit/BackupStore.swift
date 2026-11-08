@@ -370,7 +370,8 @@ public final class BackupStore: @unchecked Sendable {
 
     /// For when `bucket` has been asked.
     public func conditionalWritesRechecked(bucket: String) {
-        locked { execute("DELETE FROM meta WHERE key = ?", [Destination.bucket(bucket).recheckConditionalWritesKey]) }
+        // The one flag for all buckets, from before there was one for each.
+        locked { for key in [Destination.bucket(bucket).recheckConditionalWritesKey, "recheck-conditional-writes"] { execute("DELETE FROM meta WHERE key = ?", [key]) } }
     }
 
     private func forgetBucketHistory() {

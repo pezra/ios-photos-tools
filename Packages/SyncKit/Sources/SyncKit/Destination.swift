@@ -34,7 +34,10 @@ public enum Destination: Hashable, Sendable {
 
     /// The last answer on whether a bucket can refuse an upload to a taken name, and when it was asked.
     public var conditionalWritesKey: String {
-        "conditional-writes-\(name)"
+        switch self {
+        case .drive(let id): "conditional-writes-drive-\(id)"
+        case .bucket(let identity): "conditional-writes-\(identity)"
+        }
     }
 
     /// Set when the answer is known to be out of date, until the bucket is asked again.

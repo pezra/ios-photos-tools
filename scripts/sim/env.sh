@@ -18,7 +18,7 @@ S3_CONTAINER="pt-s3"; [[ "$S3_PORT" == 9000 ]] || S3_CONTAINER="pt-s3-$S3_PORT"
 S3_URL="http://127.0.0.1:$S3_PORT"
 S3_KEY="ptadmin"
 S3_SECRET="ptadmin-secret"
-DRIVE_FOLDER="TestDrive"
+DRIVE_FOLDER="${DRIVE_FOLDER:-TestDrive}"
 
 mkdir -p "$WORK_DIR"
 
