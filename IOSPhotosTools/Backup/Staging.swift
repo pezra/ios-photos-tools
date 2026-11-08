@@ -7,7 +7,7 @@ import Foundation
 /// so this lives in Application Support (not Caches, which the system may purge).
 enum Staging {
     static let directory: URL = {
-        var url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        var url = AppDirectories.support
             .appendingPathComponent("Staging", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         var values = URLResourceValues()

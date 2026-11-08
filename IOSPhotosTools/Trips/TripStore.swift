@@ -38,9 +38,7 @@ struct StoredTrip: Codable, Identifiable, Equatable, Sendable {
 /// Saves trips as a small JSON file. There are at most a few hundred, so this is plenty.
 enum TripStore {
     private static var url: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("trips.json")
+        AppDirectories.support.appendingPathComponent("trips.json")
     }
 
     static func load() -> [UUID: StoredTrip] {

@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import SyncKit
 
 /// Cache of photo analyses, so a rescan only looks at new or edited photos, plus the near
 /// duplicates the user has decided to keep.
@@ -8,21 +9,11 @@ import SQLite3
 final class AnalysisStore: @unchecked Sendable {
     static let shared = AnalysisStore()
 
-    private var db: OpaquePointer?
-    private let lock = NSLock()
-    private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    private let db: SQLiteDatabase
 
     private init() {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let path = dir.appendingPathComponent("analysis.sqlite").path
-        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
-            fatalError("Could not open analysis database at \(path)")
-        }
-        // WAL with NORMAL sync survives app crashes; only a power loss can drop the last few writes.
-        sqlite3_exec(db, """
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
+        db = SQLiteDatabase(path: AppDirectories.support.appendingPathComponent("analysis.sqlite").path, synchronous: .normal)
+        db.executeScript("""
             CREATE TABLE IF NOT EXISTS analyses (
                 id TEXT PRIMARY KEY,
                 modified_at REAL,
@@ -38,16 +29,14 @@ final class AnalysisStore: @unchecked Sendable {
             CREATE TABLE IF NOT EXISTS kept (
                 id TEXT PRIMARY KEY
             );
-            """, nil, nil, nil)
-        // Columns added after the first release. Each fails harmlessly once it exists. Rows from
-        // before have version 1, so tools that need the new columns re-analyze them.
-        for column in [
-            "face_count INTEGER NOT NULL DEFAULT 0",
-            "face_area REAL NOT NULL DEFAULT 0",
-            "person_area REAL NOT NULL DEFAULT 0",
-            "version INTEGER NOT NULL DEFAULT 1",
-        ] {
-            sqlite3_exec(db, "ALTER TABLE analyses ADD COLUMN \(column)", nil, nil, nil)
+            """)
+        // Columns added after the first release. Rows from before have version 1, so tools that
+        // need the new columns re-analyze them.
+        db.migrate(to: 1) {
+            db.addColumn("face_count", definition: "INTEGER NOT NULL DEFAULT 0", to: "analyses")
+            db.addColumn("face_area", definition: "REAL NOT NULL DEFAULT 0", to: "analyses")
+            db.addColumn("person_area", definition: "REAL NOT NULL DEFAULT 0", to: "analyses")
+            db.addColumn("version", definition: "INTEGER NOT NULL DEFAULT 1", to: "analyses")
         }
     }
 
@@ -110,12 +99,15 @@ final class AnalysisStore: @unchecked Sendable {
     /// Forgets photos that are no longer in the library.
     func remove(_ ids: [String]) {
         locked {
-            execute("BEGIN")
-            for id in ids {
-                execute("DELETE FROM analyses WHERE id = ?", [id])
-                execute("DELETE FROM kept WHERE id = ?", [id])
+            _ = db.transaction {
+                // In groups, since SQLite limits how many values one statement can take.
+                for start in stride(from: 0, to: ids.count, by: 500) {
+                    let group = Array(ids[start..<min(start + 500, ids.count)])
+                    let marks = Array(repeating: "?", count: group.count).joined(separator: ", ")
+                    db.execute("DELETE FROM analyses WHERE id IN (\(marks))", group)
+                    db.execute("DELETE FROM kept WHERE id IN (\(marks))", group)
+                }
             }
-            execute("COMMIT")
         }
     }
 
@@ -138,61 +130,18 @@ final class AnalysisStore: @unchecked Sendable {
                       version: Int(sqlite3_column_int64(stmt, 13)))
     }
 
-    private func locked<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
-    }
+    private func locked<T>(_ body: () -> T) -> T { db.locked(body) }
 
-    private func prepare(_ sql: String, _ args: [Any?]) -> OpaquePointer? {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            print("SQLite prepare failed: \(String(cString: sqlite3_errmsg(db))) — \(sql)")
-            return nil
-        }
-        for (i, arg) in args.enumerated() {
-            let index = Int32(i + 1)
-            switch arg {
-            case let v as String: sqlite3_bind_text(stmt, index, v, -1, Self.transient)
-            case let v as Int: sqlite3_bind_int64(stmt, index, Int64(v))
-            case let v as Double: sqlite3_bind_double(stmt, index, v)
-            case let v as Data:
-                _ = v.withUnsafeBytes { sqlite3_bind_blob(stmt, index, $0.baseAddress, Int32(v.count), Self.transient) }
-            default: sqlite3_bind_null(stmt, index)
-            }
-        }
-        return stmt
-    }
+    private func execute(_ sql: String, _ args: [Any?] = []) { db.execute(sql, args) }
 
-    private func execute(_ sql: String, _ args: [Any?] = []) {
-        guard let stmt = prepare(sql, args) else { return }
-        defer { sqlite3_finalize(stmt) }
-        if sqlite3_step(stmt) != SQLITE_DONE {
-            print("SQLite step failed: \(String(cString: sqlite3_errmsg(db))) — \(sql)")
-        }
-    }
+    private func query<T>(_ sql: String, _ args: [Any?] = [], _ row: (OpaquePointer) -> T) -> [T] { db.query(sql, args, row) }
 
-    private func query<T>(_ sql: String, _ args: [Any?] = [], _ row: (OpaquePointer) -> T) -> [T] {
-        guard let stmt = prepare(sql, args) else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        var results: [T] = []
-        while sqlite3_step(stmt) == SQLITE_ROW { results.append(row(stmt)) }
-        return results
-    }
+    private func text(_ stmt: OpaquePointer, _ column: Int32) -> String? { SQLiteDatabase.text(stmt, column) }
 
-    private func text(_ stmt: OpaquePointer, _ column: Int32) -> String? {
-        sqlite3_column_text(stmt, column).map { String(cString: $0) }
-    }
-
-    private func double(_ stmt: OpaquePointer, _ column: Int32) -> Double? {
-        sqlite3_column_type(stmt, column) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, column)
-    }
+    private func double(_ stmt: OpaquePointer, _ column: Int32) -> Double? { SQLiteDatabase.double(stmt, column) }
 
     private func floats(_ stmt: OpaquePointer, _ column: Int32) -> [Float] {
-        guard let bytes = sqlite3_column_blob(stmt, column) else { return [] }
-        let byteCount = Int(sqlite3_column_bytes(stmt, column))
-        var values = [Float](repeating: 0, count: byteCount / MemoryLayout<Float>.size)
-        _ = values.withUnsafeMutableBytes { memcpy($0.baseAddress!, bytes, $0.count) }
-        return values
+        guard let data = SQLiteDatabase.blob(stmt, column) else { return [] }
+        return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
     }
 }
