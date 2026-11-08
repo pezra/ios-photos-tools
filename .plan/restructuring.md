@@ -379,6 +379,9 @@ names the bucket refused (412) is a recursive `performPass(isRetry:)`.
   that window: if one is due, the file is encoded to disk and queued as a background-session upload, or
   left for the next run.
 - `uploadStallLimit`, the polling and `performPass(isRetry:)` go away.
+- Found in step F: "Forget backup history" (or a bucket switch) while uploads are in flight leaves
+  extra copies under "(1)" names, because the resent upload is refused and the refused key isn't in
+  the reused listing. The HEAD-on-412 above fixes this; check it in this step.
 
 **Tests.** A `SettleTracker` in SyncKit that reads the store's counts on each signal: settling, a reset
 mid-flight (the `superseded` case), signals arriving before anyone listens, duplicate signals.
