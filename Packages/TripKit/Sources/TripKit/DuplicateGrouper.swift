@@ -63,7 +63,8 @@ public enum DuplicateGrouper {
     public typealias Distance = (DuplicateCandidate, DuplicateCandidate) -> Float
 
     /// Groups of two or more near-identical photos, newest first, each ranked best first.
-    /// `distance` is called at most once for a pair of photos.
+    /// `distance` is called at most once for a pair of photos. If the calling task is cancelled the
+    /// result is incomplete and should be thrown away.
     public static func groups(_ candidates: [DuplicateCandidate], options: Options = Options(),
                               distance: @escaping Distance = { FeaturePrint.distance($0.featurePrint, $1.featurePrint) }) -> [DuplicateGroup] {
         let distances = DistanceCache(distance)
@@ -135,6 +136,7 @@ public enum DuplicateGrouper {
 
         var open: [[DuplicateCandidate]] = []
         for candidate in dated {
+            if Task.isCancelled { break }
             let time = candidate.createdAt!
             // Close clusters whose newest photo is out of range; nothing later can join them.
             let (stale, live) = open.partitioned { time.timeIntervalSince($0.last!.createdAt!) > options.window }

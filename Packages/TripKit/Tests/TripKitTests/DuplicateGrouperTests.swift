@@ -164,6 +164,17 @@ final class DuplicateGrouperTests: XCTestCase {
         XCTAssertEqual(ids(counted), ids(DuplicateGrouper.groups(photos)))
     }
 
+    func testStopsEarlyWhenCancelled() async {
+        let photos = (0..<50).map { photo("c\($0)", at: Double($0), look: $0) }
+        let calls = await Task { () -> Int in
+            withUnsafeCurrentTask { $0?.cancel() }
+            var calls = 0
+            _ = DuplicateGrouper.groups(photos) { a, b in calls += 1; return FeaturePrint.distance(a.featurePrint, b.featurePrint) }
+            return calls
+        }.value
+        XCTAssertEqual(calls, 0)
+    }
+
     /// A fixed mixed set, pinned so refactors of the grouper can't change what it finds.
     func testPinnedLargeFixture() {
         var photos: [DuplicateCandidate] = []
