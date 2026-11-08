@@ -102,6 +102,7 @@ public final class BackupStore: @unchecked Sendable {
                 size INTEGER NOT NULL,
                 PRIMARY KEY (source, norm)
             );
+            CREATE INDEX IF NOT EXISTS remote_files_norm ON remote_files(norm);
             CREATE TABLE IF NOT EXISTS imported_assets (
                 asset_id TEXT PRIMARY KEY,
                 tag TEXT NOT NULL
