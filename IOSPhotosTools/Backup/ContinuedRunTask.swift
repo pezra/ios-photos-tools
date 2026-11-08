@@ -103,6 +103,11 @@ final class ContinuedRunTask: @unchecked Sendable {
         }
     }
 
+    /// Whether the run has a continued task now.
+    static var isAttached: Bool {
+        shared.lock.withLock { shared.task != nil }
+    }
+
     // MARK: - The run's progress
 
     static func runStarted() {

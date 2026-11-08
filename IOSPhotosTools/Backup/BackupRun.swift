@@ -1,6 +1,7 @@
 import Foundation
 import S3Kit
 import SyncKit
+import UIKit
 
 /// The one way anything starts backing up or syncing. A run does, in order:
 /// 1. the library snapshot;
@@ -117,6 +118,7 @@ final class BackupRun: @unchecked Sendable {
     private func perform(_ run: Run) async {
         Log.run.info("Run started (\(run.reason, privacy: .public)): \(Self.names(run.plannedParts), privacy: .public)")
         ContinuedRunTask.runStarted()
+        let backgroundTime = await BackgroundTime.begin()
 
         await step("library snapshot") { _ = await LibrarySnapshot.current() }
 
@@ -134,6 +136,7 @@ final class BackupRun: @unchecked Sendable {
 
         Log.run.info("Run ended after \(Date().timeIntervalSince(run.started), format: .fixed(precision: 1)) s\(run.isStopped ? ", stopped" : "", privacy: .public)")
         ContinuedRunTask.runEnded()
+        await backgroundTime?.end()
     }
 
     private func endIfIdle(_ run: Run) -> Bool {
@@ -170,6 +173,32 @@ final class BackupRun: @unchecked Sendable {
                                       sync: SettingsStore.syncEnabled)
             return Situation(setup: setup, bucket: bucket, drive: DriveDestination.id)
         }
+    }
+}
+
+/// For a run started in the foreground: a little time to reach a safe stopping point if the app is
+/// left. Runs the app starts on its own never get a continued task, so when this time runs out the
+/// run stops, unless a tap has given it one since.
+@MainActor
+private final class BackgroundTime {
+    private var identifier = UIBackgroundTaskIdentifier.invalid
+
+    static func begin() -> BackgroundTime? {
+        guard UIApplication.shared.applicationState != .background else { return nil }
+        let time = BackgroundTime()
+        time.identifier = UIApplication.shared.beginBackgroundTask(withName: "Backup run") {
+            if !ContinuedRunTask.isAttached {
+                BackupRun.stopAll(because: "the app's time in the background ran out")
+            }
+            time.end()
+        }
+        return time.identifier == .invalid ? nil : time
+    }
+
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
     }
 }
 

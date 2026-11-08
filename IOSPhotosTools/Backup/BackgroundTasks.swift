@@ -1,4 +1,5 @@
 import BackgroundTasks
+import Foundation
 
 /// Schedules backup passes whenever iOS lets the app run in the background (on battery or charging).
 /// If the USB drive happens to be plugged in then, it's backed up too. Trip albums are kept up to
@@ -43,15 +44,49 @@ enum BackgroundTasks {
         // A background run is an activation of its own, and the next foreground one lists again.
         LibrarySnapshot.invalidate()
         schedule()
+        let completion = Completion(task)
         task.expirationHandler = {
             Log.background.info("Background backup expired")
             BackupRun.stopAll(because: "the background task expired")
+            // Completed promptly, not once the run has ended: whichever comes first.
+            Task {
+                await BackupRun.shared.join()
+                completion.complete(success: false)
+            }
+            Task {
+                try? await Task.sleep(for: expiryWait)
+                completion.complete(success: false)
+            }
         }
+        // A run that's still going when the app is opened carries on, and a tap can give it a
+        // continued task.
         Task {
             await BackupRun.shared.run(.automatic, because: "background task")
             LibrarySnapshot.invalidate()
-            task.setTaskCompleted(success: true)
-            Log.background.info("Background backup completed")
+            completion.complete(success: true)
+        }
+    }
+
+    /// How long an expired background task waits for the run to stop before it's completed.
+    private static let expiryWait: Duration = .seconds(3)
+
+    /// Completes a task once, whichever path gets there first.
+    private final class Completion: @unchecked Sendable {
+        private let task: BGTask
+        private let lock = NSLock()
+        private var done = false
+
+        init(_ task: BGTask) {
+            self.task = task
+        }
+
+        func complete(success: Bool) {
+            guard lock.withLock({ () -> Bool in
+                defer { done = true }
+                return !done
+            }) else { return }
+            task.setTaskCompleted(success: success)
+            Log.background.info("Background backup \(success ? "completed" : "stopped", privacy: .public)")
         }
     }
 
