@@ -176,6 +176,13 @@ enum TestHooks {
         let folder = documents.appendingPathComponent(name, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            // Choosing the drive again would give it a new ID and forget its records.
+            if let current = DriveDestination.open() {
+                defer { DriveDestination.close(current) }
+                if current.resolvingSymlinksInPath().path == folder.resolvingSymlinksInPath().path {
+                    return Log.background.info("Test drive already Documents/\(name, privacy: .public)")
+                }
+            }
             try SettingsStore().setDrive(folder: folder)
             Log.background.info("Test drive set to Documents/\(name, privacy: .public)")
         } catch {
