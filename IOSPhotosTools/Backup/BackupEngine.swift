@@ -38,6 +38,22 @@ actor BackupEngine {
         currentPass?.cancel()
     }
 
+    /// "Forget backup history". Stops the pass first and waits for it, since forgetting a file
+    /// between staging it and starting its upload would leave the upload with nothing to record it.
+    /// A pass that was stopped starts again.
+    func forgetHistory() async {
+        var stopped = false
+        while let currentPass {
+            stopped = true
+            currentPass.cancel()
+            await currentPass.value
+        }
+        store.reset()
+        Log.pass.info("Backup history forgotten")
+        await MainActor.run { BackupStatus.shared.refreshCounts() }
+        if stopped { _ = startPass() }
+    }
+
     private func startPass() -> Task<Void, Never> {
         if let currentPass { return currentPass }
         let pass = Task {
@@ -160,6 +176,9 @@ actor BackupEngine {
             return nil
         }
         store.register(resources.map(\.1), assetID: assetID, assetModifiedAt: modifiedAt)
+        #if DEBUG
+        TestHooks.photoRegistered()
+        #endif
         let existing = store.resources(forAsset: assetID)
 
         for (resource, row) in resources {
@@ -176,7 +195,7 @@ actor BackupEngine {
             let isOwn = plan.isOwn
             // Already at its own path in the bucket, as when reinstalling loses the upload history.
             if isOwn && !isEdit && inBucket != nil {
-                store.markDone(row.id)
+                store.markDone(row.id, sha256: previous?.sha256)
                 continue
             }
 
@@ -221,7 +240,8 @@ actor BackupEngine {
                 }
             }
             let url = client.presignedURL(method: "PUT", key: row.s3Key, expiresIn: urlLifetime)
-            store.markUploading(row.id, stagedName: stagedName, sha256: sha256)
+            store.markUploading(row.id, path: row.path, bucket: StorageInventory.identity(client: client, prefix: settings.prefix),
+                                stagedName: stagedName, sha256: sha256)
             UploadSession.shared.upload(
                 file: file,
                 to: url,

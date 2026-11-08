@@ -121,6 +121,7 @@ public final class BackupStore: @unchecked Sendable {
         sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
         migrateToLibraryLayout(onLayoutChange)
         recordWhatIsInBucket()
+        recordWhereUploadsGo()
     }
 
     /// The layout changed from `<year>/<month>/<asset-uuid>/<file>` to the picture library's, so
@@ -140,6 +141,21 @@ public final class BackupStore: @unchecked Sendable {
         execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id IN (SELECT id FROM resources WHERE state = ?)",
                 [ResourceState.done.rawValue])
         sqlite3_exec(db, "PRAGMA user_version = 2", nil, nil, nil)
+    }
+
+    /// Each upload records the path and bucket it was sent to, so finishing it can only count for
+    /// those. Uploads already going were sent to the path their file holds now.
+    private func recordWhereUploadsGo() {
+        guard userVersion < 3 else { return }
+        _ = transaction {
+            execute("ALTER TABLE resources ADD COLUMN upload_path TEXT")
+            execute("ALTER TABLE resources ADD COLUMN upload_bucket TEXT")
+            execute("""
+                UPDATE resources SET upload_path = (SELECT path FROM handled_paths WHERE handled_paths.resource_id = resources.id)
+                WHERE state = ?
+                """, [ResourceState.uploading.rawValue])
+            execute("PRAGMA user_version = 3")
+        }
     }
 
     private var userVersion: Int {
@@ -205,15 +221,23 @@ public final class BackupStore: @unchecked Sendable {
         }
     }
 
-    public func markUploading(_ id: String, stagedName: String, sha256: String?) {
+    /// `path` and `bucket` are where the upload is going.
+    public func markUploading(_ id: String, path: String, bucket: String, stagedName: String, sha256: String?) {
         locked {
-            execute("UPDATE resources SET state = ?, staged_name = ?, sha256 = ?, superseded = 0, updated_at = ? WHERE id = ?",
-                    [ResourceState.uploading.rawValue, stagedName, sha256, now, id])
+            execute("""
+                UPDATE resources SET state = ?, staged_name = ?, sha256 = ?, superseded = 0, upload_path = ?, upload_bucket = ?, updated_at = ?
+                WHERE id = ?
+                """, [ResourceState.uploading.rawValue, stagedName, sha256, path, bucket, now, id])
         }
     }
 
+    /// For an upload that has finished. It only counts for the path it was sent to.
     public func markDone(_ id: String) {
-        locked { done(id) }
+        locked {
+            guard !resetSuperseded(id) else { return }
+            guard let path = query("SELECT upload_path FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
+            done(id, path: path)
+        }
     }
 
     public func markFailed(_ id: String, error: String) {
@@ -433,11 +457,12 @@ public final class BackupStore: @unchecked Sendable {
         }
     }
 
-    /// Records the upload of an edited version that turned out to be in the bucket already.
+    /// Records a file that turned out to be in the bucket already.
     public func markDone(_ id: String, sha256: String?) {
         locked {
+            guard let path = query("SELECT path FROM handled_paths WHERE resource_id = ?", [id], { text($0, 0) }).first ?? nil else { return }
             execute("UPDATE resources SET sha256 = ? WHERE id = ?", [sha256, id])
-            done(id)
+            done(id, path: path)
         }
     }
 
@@ -699,13 +724,16 @@ public final class BackupStore: @unchecked Sendable {
         InventoryEntry(source: StorageSource(rawValue: text(stmt, 0) ?? "") ?? .drive, path: text(stmt, 1) ?? "", size: sqlite3_column_int64(stmt, 2))
     }
 
-    private func done(_ id: String) {
-        guard !resetSuperseded(id) else { return }
+    /// `path` is where the file is in the bucket. Nothing counts for a file that's been forgotten,
+    /// such as by `reset` between registering and uploading it, so what's at its path isn't taken
+    /// for the photo's own.
+    private func done(_ id: String, path: String) {
+        guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
         execute("UPDATE resources SET state = ?, staged_name = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
                 [ResourceState.done.rawValue, now, id])
-        execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id = ? AND on_bucket = 0", [id])
+        execute("UPDATE handled_paths SET on_bucket = 1 WHERE norm = ? AND resource_id = ? AND on_bucket = 0",
+                [LibraryPath.normalized(path), id])
         if sqlite3_changes(db) > 0 { bumpHandledVersion() }
-        guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
         completeAssetIfFinished(assetID)
     }
 

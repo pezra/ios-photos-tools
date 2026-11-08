@@ -39,8 +39,12 @@ final class BackupStoreTests: XCTestCase {
         store.register(rows, assetID: asset, assetModifiedAt: 5)
     }
 
+    /// Starts uploads to the paths the files hold now.
     private func upload(_ ids: String...) {
-        for id in ids { store.markUploading(id, stagedName: "staged-\(id)", sha256: nil) }
+        for id in ids {
+            let path = store.paths(forAsset: ResourceRow.assetID(ofResource: id))[id] ?? ""
+            store.markUploading(id, path: path, bucket: "svc/A/p", stagedName: "staged-\(id)", sha256: nil)
+        }
     }
 
     private func state(_ asset: String, _ id: String) -> ResourceState? {
@@ -181,6 +185,17 @@ final class BackupStoreTests: XCTestCase {
         store.markDone("a#1")
         XCTAssertEqual(state("a", "a#1"), .pending)
         XCTAssertFalse(store.isInBucket("2026/A.HEIC"))
+        XCTAssertNil(store.completedAssets()["a"])
+    }
+
+    func testForgettingHistoryWhileStagingLeavesThePathAlone() {
+        open()
+        add([row("a#1", "a", "2026/A.HEIC")], asset: "a")
+        store.reset()
+        upload("a#1")
+        store.markDone("a#1")
+        XCTAssertFalse(store.isInBucket("2026/A.HEIC"), "nothing recorded that upload")
+        XCTAssertNil(state("a", "a#1"))
         XCTAssertNil(store.completedAssets()["a"])
     }
 
@@ -432,6 +447,20 @@ final class BackupStoreTests: XCTestCase {
         upload("pending")
         store.markDone("pending")
         XCTAssertEqual(store.count(.done), 2, "older rows work with the newer columns")
+    }
+
+    func testUploadGoingDuringAnUpgradeCountsForItsPath() {
+        seed(version: 2)
+        sql("""
+            ALTER TABLE handled_paths ADD COLUMN on_bucket INTEGER NOT NULL DEFAULT 0;
+            INSERT INTO resources (id, asset_id, s3_key, state, updated_at) VALUES ('up', 'z', 'k', 1, 0);
+            INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id) VALUES ('2026/up.heic', '2026/Up.HEIC', 'backup', 'up', 'z');
+            """)
+        open()
+        store.markDone("up")
+        XCTAssertEqual(state("z", "up"), .done)
+        XCTAssertTrue(store.isInBucket("2026/Up.HEIC"))
+        XCTAssertFalse(store.isInBucket("2026/done.heic"), "version 2 already counted what was there")
     }
 
     func testOldLayoutStartsOverOnce() {

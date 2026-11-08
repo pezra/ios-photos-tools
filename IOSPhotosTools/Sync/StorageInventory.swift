@@ -206,7 +206,7 @@ enum StorageInventory {
     }
 
     /// The service is part of it, since a bucket of the same name elsewhere is a different one.
-    private static func identity(client: S3Client, prefix: String) -> String {
+    static func identity(client: S3Client, prefix: String) -> String {
         let endpoint = client.config.endpoint
         let service = (endpoint.host ?? "").lowercased() + (endpoint.port.map { ":\($0)" } ?? "")
         return "\(service)/\(client.config.bucket)/\(prefix)"

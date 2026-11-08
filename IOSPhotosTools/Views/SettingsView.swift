@@ -162,8 +162,7 @@ struct SettingsView: View {
             }
             .confirmationDialog("Check your whole library again?", isPresented: $confirmingReset, titleVisibility: .visible) {
                 Button("Forget backup history", role: .destructive) {
-                    BackupStore.shared.reset()
-                    BackupStatus.shared.refreshCounts()
+                    Task { await BackupEngine.shared.forgetHistory() }
                 }
             }
         }

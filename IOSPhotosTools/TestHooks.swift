@@ -10,6 +10,8 @@ import Foundation
 ///   Saved as if typed into settings.
 /// - `PT_TEST_DRIVE`: the name of a folder in the app's Documents to use as the drive, created if
 ///   needed. Standing in for a folder chosen on a USB drive.
+/// - `PT_TEST_FORGET_AFTER`: a number of photos. Once the bucket pass has registered that many,
+///   "Forget backup history" is tapped, while the last of them is still being staged.
 enum TestHooks {
     private struct Settings: Decodable {
         var endpoint: String?
@@ -23,6 +25,22 @@ enum TestHooks {
         var driveAutoBackup: Bool?
         var tripAlbums: Bool?
         var syncEnabled: Bool?
+    }
+
+    private static let forgetAfter = ProcessInfo.processInfo.environment["PT_TEST_FORGET_AFTER"].flatMap(Int.init)
+    private static let staged = NSLock()
+    nonisolated(unsafe) private static var stagedCount = 0
+
+    /// Called by the bucket pass each time it registers a photo's files.
+    static func photoRegistered() {
+        guard let forgetAfter else { return }
+        let count = staged.withLock {
+            stagedCount += 1
+            return stagedCount
+        }
+        guard count == forgetAfter else { return }
+        Log.background.info("Test hook: forgetting backup history after \(count) photos")
+        Task { await BackupEngine.shared.forgetHistory() }
     }
 
     /// Must run before the app's `SettingsStore` is made, so it reads what's saved here.
