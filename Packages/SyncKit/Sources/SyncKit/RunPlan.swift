@@ -63,12 +63,13 @@ public enum RunPlan {
     public static let throttle: TimeInterval = 5 * 60
 
     /// The parts a new run started by `trigger` does, or nil when it shouldn't start: an opening
-    /// within `throttle` of the last run finishing, unless a destination has changed since.
-    public static func parts(for trigger: Trigger, setup: Setup, lastRunEnded: Date?, destinationChanged: Bool,
+    /// within `throttle` of the last run finishing, unless `setupChanged` (a destination, or what's
+    /// switched on, is different from the last run's).
+    public static func parts(for trigger: Trigger, setup: Setup, lastRunEnded: Date?, setupChanged: Bool,
                              now: Date) -> Set<Part>? {
         switch trigger {
         case .opened:
-            if let lastRunEnded, now.timeIntervalSince(lastRunEnded) < throttle, !destinationChanged { return nil }
+            if let lastRunEnded, now.timeIntervalSince(lastRunEnded) < throttle, !setupChanged { return nil }
             return setup.automaticParts
         case .automatic:
             return setup.automaticParts
@@ -92,16 +93,15 @@ public enum RunPlan {
     /// The listings a part needs before it starts. `pending` is how many photos it has to do, and
     /// `parts` what the run does.
     ///
-    /// Names are checked against both places, so copying to the drive needs the bucket's listing,
-    /// which staging for the bucket makes when it's part of the run. Staging goes by the bucket's
+    /// Names are checked against both places, so copying to the drive needs the bucket's listing
+    /// too (made once per run, by whichever part gets there first). Staging goes by the bucket's
     /// alone, as it always has, but waits for a drive listing being made in the same run.
     public static func needs(_ part: Part, pending: Int, parts: Set<Part>, setup: Setup) -> (drive: Bool, bucket: Bool) {
         switch part {
         case .bucket:
             return (false, setup.bucket && pending > 0)
         case .drive:
-            return (setup.drive && (pending > 0 || parts.contains(.sync)),
-                    setup.bucket && pending > 0 && !parts.contains(.bucket))
+            return (setup.drive && (pending > 0 || parts.contains(.sync)), setup.bucket && pending > 0)
         case .sync:
             return (setup.drive, setup.bucket)
         }

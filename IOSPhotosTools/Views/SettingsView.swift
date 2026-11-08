@@ -233,7 +233,7 @@ struct SettingsView: View {
 
     private func startSync() {
         settings.syncEnabled = true
-        LibrarySyncEngine.startFromUI()
+        BackupRun.tap(.sync)
     }
 }
 

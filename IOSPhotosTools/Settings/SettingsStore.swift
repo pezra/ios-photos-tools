@@ -66,7 +66,7 @@ final class SettingsStore {
     }
 
     func setDrive(folder: URL) throws {
-        DriveBackupEngine.stop()
+        BackupRun.pause(.drive)
         let previousID = DriveDestination.id
         try DriveDestination.configure(folder: folder)
         try StorageInventory.useDrive(DriveDestination.id, assumingPrevious: previousID)
@@ -74,7 +74,7 @@ final class SettingsStore {
     }
 
     func forgetDrive() {
-        DriveBackupEngine.stop()
+        BackupRun.pause(.drive)
         DriveDestination.forget()
         try? StorageInventory.useDrive(nil, assumingPrevious: nil)
         driveName = nil

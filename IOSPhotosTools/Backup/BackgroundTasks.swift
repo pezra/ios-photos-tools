@@ -45,16 +45,10 @@ enum BackgroundTasks {
         schedule()
         task.expirationHandler = {
             Log.background.info("Background backup expired")
-            BackupEngine.stop()
-            DriveBackupEngine.stop()
-            LibrarySyncEngine.stop()
+            BackupRun.stopAll(because: "the background task expired")
         }
         Task {
-            async let drive: Void = SettingsStore.driveAutoBackup && DriveDestination.isConnected
-                ? DriveBackupEngine.shared.run() : ()
-            await BackupEngine.shared.run()
-            await drive
-            await LibrarySyncEngine.shared.run()
+            await BackupRun.shared.run(.automatic, because: "background task")
             LibrarySnapshot.invalidate()
             task.setTaskCompleted(success: true)
             Log.background.info("Background backup completed")

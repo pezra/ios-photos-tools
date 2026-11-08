@@ -6,7 +6,7 @@
 	<array>
 		<string>org.barelyenough.ios-photos-tools.backup</string>
 		<string>org.barelyenough.ios-photos-tools.trips</string>
-		<string>org.barelyenough.ios-photos-tools.drive.*</string>
+		<string>org.barelyenough.ios-photos-tools.run.*</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

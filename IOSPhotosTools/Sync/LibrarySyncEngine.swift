@@ -8,6 +8,7 @@ import SyncKit
 ///
 /// Only adds: a picture is imported once and then left alone. A path that's been backed up from
 /// this phone or imported is never imported again, even if the photo has since been deleted.
+/// The last part of `BackupRun`.
 actor LibrarySyncEngine {
     static let shared = LibrarySyncEngine()
 
@@ -20,41 +21,20 @@ actor LibrarySyncEngine {
     private let batchSize = 20
     private let minimumFreeBytes: Int64 = 10_000_000_000
     private let runner = PassRunner()
-    /// Lets a pass running under a system background task show its progress there.
-    private var progressHandler: (id: UUID, call: @Sendable (String, Int, Int) -> Void)?
 
-    nonisolated static func start() {
-        Task { await shared.startPass() }
-    }
-
-    /// Starts from the UI, through the drive pass if the drive's here, which keeps going when the
-    /// app is closed. Checking for the drive can be slow, so it's done off the main thread.
-    nonisolated static func startFromUI() {
-        Task.detached {
-            if DriveDestination.isConnected { await DriveBackupEngine.start() } else { start() }
-        }
-    }
-
+    /// Pauses the pass. The rest of the run carries on.
     nonisolated static func stop() {
         Task { await shared.cancel() }
     }
 
-    /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
-    /// stops the pass.
-    func run(onProgress: (@Sendable (String, Int, Int) -> Void)? = nil) async {
-        // Only the caller that set the handler clears it, so a caller without one doesn't drop another's.
-        let id = UUID()
-        if let onProgress { progressHandler = (id, onProgress) }
-        await runner.run { await self.performPass() }
-        if progressHandler?.id == id { progressHandler = nil }
+    /// Runs a pass as part of `run` (or joins the one in progress) and waits for it to finish.
+    /// Cancelling the caller stops the pass.
+    func run(in run: Run) async {
+        await runner.run { await self.performPass(run.preparation) }
     }
 
     func cancel() {
         runner.cancel()
-    }
-
-    private func startPass() {
-        runner.start { await self.performPass() }
     }
 
     // MARK: - Preview
@@ -64,7 +44,7 @@ actor LibrarySyncEngine {
         let sources = Sources.open()
         defer { sources.close() }
         guard sources.isAvailable else { throw PreviewError.noSource }
-        let reachedS3 = try await prepareInventory(sources)
+        let reachedS3 = try await prepareInventory(sources, preparation: BackupRun.preparation())
         if sources.drive == nil && !reachedS3 { throw PreviewError.noSource }
         try await scanForImportsIfNeeded()
         return candidates(sources: sources, reachedS3: reachedS3).count
@@ -80,7 +60,7 @@ actor LibrarySyncEngine {
 
     // MARK: - The pass
 
-    private func performPass() async {
+    private func performPass(_ preparation: RunPreparation) async {
         guard SettingsStore.syncEnabled else { return }
         guard PhotoLibrary.hasFullAccess else {
             return await report(phase: "Needs full photo access", running: false)
@@ -93,15 +73,15 @@ actor LibrarySyncEngine {
 
         await report(phase: "Checking storage…", running: true, startingPass: true)
         #if DEBUG
-        TestHooks.syncStarted(afterDrive: progressHandler != nil)
+        TestHooks.syncStarted()
         #endif
         let reachedS3: Bool
         do {
-            reachedS3 = try await prepareInventory(sources)
+            reachedS3 = try await prepareInventory(sources, preparation: preparation)
             await report(phase: "Checking library…", running: true)
             try await scanForImportsIfNeeded()
         } catch {
-            return await report(phase: Task.isCancelled ? "Paused" : "Couldn't check storage", running: false,
+            return await report(phase: Task.isCancelled ? BackupRun.pausedPhase : "Couldn't check storage", running: false,
                                 error: Task.isCancelled ? nil : error.localizedDescription)
         }
         guard sources.drive != nil || reachedS3 else {
@@ -161,7 +141,7 @@ actor LibrarySyncEngine {
 
         await writeHandledPaths(sources, force: true)
         let phase = stoppedFor
-            ?? (Task.isCancelled ? "Paused"
+            ?? (Task.isCancelled ? BackupRun.pausedPhase
                 : failed > 0 ? "Finished with \(failed) pictures not imported"
                 : "Up to date")
         await report(phase: phase, running: false, error: lastError,
@@ -176,20 +156,20 @@ actor LibrarySyncEngine {
         return free >= minimumFreeBytes
     }
 
-    /// Brings the record of handled paths and the listings up to date. Returns whether the bucket
-    /// could be reached, which it needn't be if the drive is here. Off the actor because walking the
-    /// drive takes a while, and pausing has to be able to get through.
-    private nonisolated func prepareInventory(_ sources: Sources) async throws -> Bool {
+    /// Brings the record of handled paths and the listings up to date, unless the run has already.
+    /// Returns whether the bucket could be reached, which it needn't be if the drive is here. Off the
+    /// actor because walking the drive takes a while, and pausing has to be able to get through.
+    private nonisolated func prepareInventory(_ sources: Sources, preparation: RunPreparation) async throws -> Bool {
         if let drive = sources.drive {
             // Counted as progress, since iOS ends a continued task whose progress stops moving.
-            try await StorageInventory.prepareDrive(root: drive.root, driveID: drive.id) { found in
-                await self.report(phase: "Reading drive… \(found.formatted()) files", running: true, done: found, total: found + 1)
+            try await preparation.prepareDrive(root: drive.root, driveID: drive.id) { found in
+                await self.showListing("Reading drive… \(found.formatted()) files")
             }
         }
         guard let bucket = sources.bucket else { return false }
         do {
-            try await StorageInventory.prepareS3(client: bucket.client, prefix: bucket.prefix, session: bucket.session) { listed in
-                await self.report(phase: "Listing bucket… \(listed.formatted()) files", running: true, done: listed, total: listed + 1)
+            try await preparation.prepareBucket(client: bucket.client, prefix: bucket.prefix, session: bucket.session) { listed in
+                await self.showListing("Listing bucket… \(listed.formatted()) files")
             }
             return true
         } catch {
@@ -393,9 +373,18 @@ actor LibrarySyncEngine {
 
     // MARK: - Status
 
+    private func showListing(_ phase: String) async {
+        ContinuedRunTask.listingStep(.sync, phase: phase)
+        await report(phase: phase, running: true)
+    }
+
     private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false, done: Int? = nil, total: Int? = nil) async {
         Log.pass.log(phase: phase, of: "sync", running: running, startingPass: startingPass)
-        if let done, let total { progressHandler?.call(phase, done, total) }
+        if let done, let total {
+            ContinuedRunTask.progress(.sync, done: done, of: total, phase: phase)
+        } else {
+            ContinuedRunTask.phase(.sync, phase)
+        }
         await MainActor.run {
             SyncStatus.shared.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
         }

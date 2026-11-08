@@ -5,7 +5,7 @@ import SyncKit
 import UIKit
 
 /// Finds assets that haven't been backed up, exports their files and hands them to the
-/// background upload session.
+/// background upload session. A part of `BackupRun`.
 actor BackupEngine {
     static let shared = BackupEngine()
 
@@ -25,10 +25,7 @@ actor BackupEngine {
     /// Whether the last pass stopped staging for want of room.
     private var leftPhotos = false
 
-    nonisolated static func start() {
-        Task { await shared.startPass() }
-    }
-
+    /// Pauses the pass. The rest of the run carries on.
     nonisolated static func stop() {
         Task { await shared.cancel() }
     }
@@ -43,10 +40,10 @@ actor BackupEngine {
         }
     }
 
-    /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
-    /// stops the pass.
-    func run() async {
-        await runner.run(onEnd: { Self.passEnded(cancelled: $0) }) { await self.performPass() }
+    /// Runs a pass as part of `run` (or joins the one in progress) and waits for it to finish.
+    /// Cancelling the caller stops the pass.
+    func run(in run: Run) async {
+        await runner.run { await self.performPass(run) }
     }
 
     func cancel() {
@@ -62,20 +59,10 @@ actor BackupEngine {
         store.reset()
         Log.pass.info("Backup history forgotten")
         await MainActor.run { BackupStatus.shared.refreshCounts() }
-        if stopped { startPass() }
+        if stopped { BackupRun.start(.user([.bucket]), because: "backup history forgotten") }
     }
 
-    @discardableResult
-    private func startPass() -> Bool {
-        runner.start(onEnd: { Self.passEnded(cancelled: $0) }) { await self.performPass() }.isNew
-    }
-
-    private static func passEnded(cancelled: Bool) {
-        // Even if this pass couldn't back anything up: syncing can still work from the drive.
-        if !cancelled { LibrarySyncEngine.start() }
-    }
-
-    private func performPass() async {
+    private func performPass(_ run: Run) async {
         resumeOnSettle = false
         guard let settings = SettingsStore.snapshot() else {
             await report(phase: "Storage not configured", running: false)
@@ -113,12 +100,17 @@ actor BackupEngine {
         var conditionalWrites = true
         // Names are checked against what's in the bucket so nothing is overwritten, so without a
         // listing nothing can safely be uploaded.
-        if !pending.isEmpty {
+        if RunPlan.needs(.bucket, pending: pending.count, parts: run.plannedParts, setup: run.setup).bucket {
             do {
-                try await StorageInventory.prepareS3(client: client, prefix: settings.prefix, session: session)
+                try await run.preparation.prepareBucket(client: client, prefix: settings.prefix, session: session) { listed in
+                    await self.showListing("Listing bucket… \(listed.formatted()) files")
+                }
                 conditionalWrites = await StorageInventory.supportsConditionalWrites(client: client, prefix: settings.prefix, session: session)
             } catch let error as URLError where error.networkUnavailableReason == .cellular {
                 await report(phase: "Waiting for Wi-Fi", running: false)
+                return
+            } catch where Task.isCancelled {
+                await report(phase: BackupRun.pausedPhase, running: false)
                 return
             } catch {
                 await report(phase: "Couldn't list the bucket", running: false,
@@ -126,6 +118,8 @@ actor BackupEngine {
                 return
             }
         }
+
+        await run.barrier.ready(.bucket)
 
         var namingFailures = 0
         var namingError: String?
@@ -136,8 +130,12 @@ actor BackupEngine {
                 stoppedEarly = !Task.isCancelled
                 break
             }
+            ContinuedRunTask.progress(.bucket, done: index, of: pending.count)
             await report(phase: "Preparing \(index + 1) of \(pending.count)", running: true)
-            if let error = await stage(asset, client: client, settings: settings, conditionalWrites: conditionalWrites) {
+            let error = await run.photoLock.withLock(asset.localIdentifier) {
+                await stage(asset, client: client, settings: settings, conditionalWrites: conditionalWrites)
+            }
+            if let error {
                 namingFailures += 1
                 namingError = error.localizedDescription
             }
@@ -151,7 +149,8 @@ actor BackupEngine {
 
         let failed = store.count(.failed) + namingFailures
         let uploading = store.count(.uploading)
-        let phase = Task.isCancelled ? "Paused"
+        ContinuedRunTask.progress(.bucket, done: pending.count, of: pending.count)
+        let phase = Task.isCancelled ? BackupRun.pausedPhase
             : failed > 0 ? "Finished with \(failed) failed files"
             : uploading > 0 ? BackupStatus.waitingForUploads
             : "Up to date"
@@ -325,7 +324,7 @@ actor BackupEngine {
         }
         if resumeOnSettle && (leftPhotos || store.count(.pending) > 0) {
             Log.pass.info("Starting a pass for what the last one left")
-            startPass()
+            BackupRun.start(.uploadsSettled, because: "uploads settled with photos left")
         }
     }
 
@@ -343,10 +342,16 @@ actor BackupEngine {
         Staging.removeOrphans(keeping: Set(store.uploadingResources().compactMap(\.stagedName)))
     }
 
+    private func showListing(_ phase: String) async {
+        ContinuedRunTask.listingStep(.bucket, phase: phase)
+        await report(phase: phase, running: true)
+    }
+
     /// `startingPass` clears the previous pass's error, which otherwise lingers when that pass
     /// was paused.
     private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false) async {
         Log.pass.log(phase: phase, of: "bucket", running: running, startingPass: startingPass)
+        ContinuedRunTask.phase(.bucket, phase)
         await MainActor.run {
             BackupStatus.shared.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
         }

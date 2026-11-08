@@ -9,7 +9,7 @@ import Testing
     private func parts(_ trigger: RunPlan.Trigger, _ setup: RunPlan.Setup? = nil, lastEnded: TimeInterval? = nil,
                        changed: Bool = false) -> Set<RunPlan.Part>? {
         RunPlan.parts(for: trigger, setup: setup ?? everything, lastRunEnded: lastEnded.map { now.addingTimeInterval(-$0) },
-                      destinationChanged: changed, now: now)
+                      setupChanged: changed, now: now)
     }
 
     // MARK: - Parts
@@ -63,9 +63,9 @@ import Testing
         #expect(RunPlan.joining(.uploadsSettled, setup: everything) == [.bucket])
     }
 
-    @Test func copyingNeedsTheBucketListingOnlyWhenStagingIsntMakingIt() {
+    @Test func copyingNeedsBothListingsAndStagingTheBucketsAlone() {
         #expect(RunPlan.needs(.drive, pending: 3, parts: [.drive], setup: everything) == (true, true))
-        #expect(RunPlan.needs(.drive, pending: 3, parts: [.bucket, .drive], setup: everything) == (true, false))
+        #expect(RunPlan.needs(.drive, pending: 3, parts: [.bucket, .drive], setup: everything) == (true, true))
         #expect(RunPlan.needs(.bucket, pending: 3, parts: [.bucket, .drive], setup: everything) == (false, true))
         #expect(RunPlan.needs(.bucket, pending: 0, parts: [.bucket], setup: everything) == (false, false))
     }
@@ -85,7 +85,7 @@ import Testing
         #expect(parts(.uploadsSettled, lastEnded: 10) == [.bucket])
     }
 
-    @Test func aChangedDestinationIsntThrottled() {
+    @Test func aChangedSetupIsntThrottled() {
         #expect(parts(.opened, lastEnded: 10, changed: true) == [.bucket, .drive, .sync])
     }
 

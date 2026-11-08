@@ -12,25 +12,27 @@ enum StorageInventory {
 
     // MARK: - Drive
 
-    /// A listing this recent is used as it is, so a sync straight after a drive backup doesn't
-    /// read the whole drive again.
-    private static let driveListingFreshFor: TimeInterval = 10 * 60
-
     /// Brings the record of handled paths and the listing of the drive up to date. The listing is
-    /// saved as it goes, so one cut short carries on next time. `progress` is told how many files
-    /// have been found so far.
-    static func prepareDrive(root: URL, driveID: String, progress: ((Int) async -> Void)? = nil) async throws {
+    /// saved as it goes, so one cut short carries on next time. `list: false` keeps the last finished
+    /// listing, for a run that `RunPlan` lets use it. `progress` is told how many files have been
+    /// found so far.
+    static func prepareDrive(root: URL, driveID: String, list: Bool, progress: ((Int) async -> Void)? = nil) async throws {
         try useDrive(driveID, assumingPrevious: nil)
         try mergeHandledPaths(fromDrive: root, driveID: driveID)
         let found = try await Log.interval("drive listing") {
             try await DriveListing(store: store, root: root, key: Destination.drive(driveID).listingKey)
-                .run(freshFor: driveListingFreshFor, progress: progress)
+                .run(freshFor: list ? 0 : .infinity, progress: progress)
         }
         if let found {
             Log.listing.info("Drive listed: \(found) files")
         } else {
-            Log.listing.info("Drive listing reused: finished within \(Int(driveListingFreshFor)) s")
+            Log.listing.info("Drive listing reused: made by the last run")
         }
+    }
+
+    /// When the drive's last listing finished, if one has.
+    static func driveListedAt(driveID: String) -> Date? {
+        store.meta("\(Destination.drive(driveID).listingKey)-finished").flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
     }
 
     /// The drive folder changed, if it isn't the one last used: what was kept about the old one goes.
@@ -77,29 +79,30 @@ enum StorageInventory {
 
     // MARK: - Bucket
 
-    /// A listing of the bucket this recent is used as it is, since one background run backs up,
-    /// copies to the drive and syncs, and each would otherwise list the whole bucket. This app's
-    /// own uploads are recorded as they finish, so only files put there by something else are
-    /// missed for a while, and a bucket that refuses uploads to taken names won't let an upload
-    /// land on one. One that can't refuse them has only the listing, so it's always listed again.
-    private static let s3ListingFreshFor: TimeInterval = 10 * 60
-
-    /// Brings the record of handled paths and the listing of the bucket up to date. `progress` is
-    /// told how many objects have been listed so far.
-    static func prepareS3(client: S3Client, prefix: String, session: URLSession,
+    /// Brings the record of handled paths and the listing of the bucket up to date. `list: false`
+    /// keeps the last listing, for a run that `RunPlan` lets use it. This app's own uploads are
+    /// recorded as they finish, so only files put there by something else are missed, and a bucket
+    /// that refuses uploads to taken names won't let an upload land on one. One that can't refuse
+    /// them has only the listing, so it's always listed again. `progress` is told how many objects
+    /// have been listed so far.
+    static func prepareS3(client: S3Client, prefix: String, session: URLSession, list: Bool,
                           progress: ((Int) async -> Void)? = nil) async throws {
         try noticeBucket(client: client, prefix: prefix)
-        let listedAt = store.meta(listedKey(client: client, prefix: prefix)).flatMap(Double.init) ?? 0
-        let isFresh = hasListedS3(client: client, prefix: prefix) && !lacksConditionalWrites(client: client, prefix: prefix)
-            && Date().timeIntervalSince1970 - listedAt < s3ListingFreshFor
+        let reuse = !list && hasListedS3(client: client, prefix: prefix) && !lacksConditionalWrites(client: client, prefix: prefix)
         try await mergeHandledPaths(fromS3: client, prefix: prefix, session: session)
-        if isFresh {
-            Log.listing.info("Bucket listing reused: listed within \(Int(s3ListingFreshFor)) s")
+        if reuse {
+            Log.listing.info("Bucket listing reused: made by the last run")
         } else {
             try await Log.interval("bucket listing") {
                 try await refreshS3(client: client, prefix: prefix, session: session, progress: progress)
             }
         }
+    }
+
+    /// When this bucket was last listed, if the listing kept is its.
+    static func bucketListedAt(client: S3Client, prefix: String) -> Date? {
+        guard hasListedS3(client: client, prefix: prefix) else { return nil }
+        return store.meta(listedKey(client: client, prefix: prefix)).flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
     }
 
     /// What's been backed up to one bucket says nothing about another, so switching to a different

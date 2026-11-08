@@ -12,6 +12,7 @@ enum Log {
     static let handledPaths = Logger(subsystem: subsystem, category: "handled-paths")
     static let library = Logger(subsystem: subsystem, category: "library")
     static let pass = Logger(subsystem: subsystem, category: "pass")
+    static let run = Logger(subsystem: subsystem, category: "run")
     static let upload = Logger(subsystem: subsystem, category: "upload")
     static let continuedTask = Logger(subsystem: subsystem, category: "continued-task")
     static let background = Logger(subsystem: subsystem, category: "background")

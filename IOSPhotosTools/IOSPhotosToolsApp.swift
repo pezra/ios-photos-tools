@@ -33,8 +33,7 @@ struct IOSPhotosToolsApp: App {
                 // again, once for everything that starts now.
                 status.refresh(relist: wasInBackground)
                 wasInBackground = false
-                // A backup pass ends by syncing, so that new backups count as dealt with first.
-                if settings.autoBackup { BackupEngine.start() } else { LibrarySyncEngine.start() }
+                BackupRun.start(.opened, because: "app opened")
                 if settings.tripAlbums { TripsModel.shared.start() }
                 DriveMonitor.shared.start()
             case .background:

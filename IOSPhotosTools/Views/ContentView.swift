@@ -81,7 +81,7 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showingSettings, onDismiss: {
                 status.refresh()
-                if settings.autoBackup { BackupEngine.start() }
+                BackupRun.start(.opened, because: "settings closed")
             }) {
                 SettingsView()
             }
@@ -102,8 +102,8 @@ struct ContentView: View {
             error: status.lastError,
             isRunning: status.isRunning,
             canStart: PhotoLibrary.isAuthorized,
-            start: { BackupEngine.start() },
-            stop: { BackupEngine.stop() }
+            start: { BackupRun.tap(.bucket) },
+            stop: { BackupRun.pause(.bucket) }
         )
     }
 
@@ -117,8 +117,8 @@ struct ContentView: View {
             error: drive.lastError,
             isRunning: drive.isRunning,
             canStart: drive.isConnected && PhotoLibrary.isAuthorized,
-            start: { DriveBackupEngine.start() },
-            stop: { DriveBackupEngine.stop() }
+            start: { BackupRun.tap(.drive) },
+            stop: { BackupRun.pause(.drive) }
         )
     }
 
@@ -136,8 +136,8 @@ struct ContentView: View {
             isRunning: sync.isRunning,
             canStart: PhotoLibrary.hasFullAccess,
             startTitle: "Sync now",
-            start: { LibrarySyncEngine.startFromUI() },
-            stop: { LibrarySyncEngine.stop() }
+            start: { BackupRun.tap(.sync) },
+            stop: { BackupRun.pause(.sync) }
         )
     }
 
@@ -156,7 +156,7 @@ struct ContentView: View {
         if PHPhotoLibrary.authorizationStatus(for: .readWrite) == .notDetermined {
             _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
             status.refresh()
-            if settings.autoBackup { BackupEngine.start() }
+            BackupRun.start(.automatic, because: "photo access answered")
             if settings.tripAlbums { TripsModel.shared.start() }
         } else {
             // The app becoming active has just listed the library.

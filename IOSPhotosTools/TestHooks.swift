@@ -2,6 +2,7 @@
 import CoreImage
 import Foundation
 import Photos
+import SyncKit
 
 /// Lets the simulator scripts in `scripts/sim` set the app up without tapping through settings.
 /// Debug builds only. Read from the environment at launch, which `xcrun simctl launch` passes on
@@ -17,10 +18,12 @@ import Photos
 /// - `PT_TEST_FORGET_AFTER`: a number of photos. Once the bucket pass has registered that many,
 ///   "Forget backup history" is tapped, while the last of them is still being staged.
 /// - `PT_TEST_PAUSE`: `row,after,resume` where row is `bucket`, `drive` or `sync`, and both times are
-///   seconds. Taps that row's pause button `after` seconds after launch and its resume button
+///   seconds. Taps that row's pause button `after` seconds after launch and its start button
 ///   `resume` seconds later. Several can be given, separated by semicolons.
+/// - `PT_TEST_TAP`: `row,after`. Taps that row's start button `after` seconds after launch.
+///   Several can be given, separated by semicolons.
 /// - `PT_TEST_PAUSE_DRIVE_IN_SYNC`: any value. Pauses the drive when the sync pass first starts,
-///   which stops the sync if the drive's pass is waiting on it.
+///   which leaves the sync running.
 enum TestHooks {
     private struct Settings: Decodable {
         var endpoint: String?
@@ -55,11 +58,11 @@ enum TestHooks {
     nonisolated(unsafe) private static var pausedInSync = false
 
     /// Called when the sync pass starts.
-    static func syncStarted(afterDrive: Bool) {
-        guard afterDrive, ProcessInfo.processInfo.environment["PT_TEST_PAUSE_DRIVE_IN_SYNC"] != nil, !pausedInSync else { return }
+    static func syncStarted() {
+        guard ProcessInfo.processInfo.environment["PT_TEST_PAUSE_DRIVE_IN_SYNC"] != nil, !pausedInSync else { return }
         pausedInSync = true
         Log.background.info("Test hook: pausing drive during its sync step")
-        DriveBackupEngine.stop()
+        BackupRun.pause(.drive)
     }
 
     /// Must run before the app's `SettingsStore` is made, so it reads what's saved here.
@@ -74,6 +77,9 @@ enum TestHooks {
         if let spec = environment["PT_TEST_PAUSE"] {
             for part in spec.split(separator: ";") { pauseAndResume(String(part)) }
         }
+        if let spec = environment["PT_TEST_TAP"] {
+            for part in spec.split(separator: ";") { tap(String(part)) }
+        }
         if let count = environment["PT_TEST_EDIT"].flatMap(Int.init) {
             Task.detached { await editPhotos(count) }
         }
@@ -84,23 +90,28 @@ enum TestHooks {
         guard parts.count == 3, let after = Double(parts[1]), let resume = Double(parts[2]) else {
             return Log.background.error("PT_TEST_PAUSE isn't row,after,resume")
         }
-        let row = parts[0]
+        guard let row = RunPlan.Part(rawValue: parts[0]) else {
+            return Log.background.error("PT_TEST_PAUSE row isn't bucket, drive or sync")
+        }
         Task.detached {
             try? await Task.sleep(for: .seconds(after))
-            Log.background.info("Test hook: pausing \(row, privacy: .public)")
-            switch row {
-            case "bucket": BackupEngine.stop()
-            case "drive": DriveBackupEngine.stop()
-            case "sync": LibrarySyncEngine.stop()
-            default: return
-            }
+            Log.background.info("Test hook: pausing \(row.rawValue, privacy: .public)")
+            BackupRun.pause(row)
             try? await Task.sleep(for: .seconds(resume))
-            Log.background.info("Test hook: resuming \(row, privacy: .public)")
-            switch row {
-            case "bucket": BackupEngine.start()
-            case "drive": await DriveBackupEngine.start()
-            default: LibrarySyncEngine.startFromUI()
-            }
+            Log.background.info("Test hook: resuming \(row.rawValue, privacy: .public)")
+            await BackupRun.tap(row)
+        }
+    }
+
+    private static func tap(_ spec: String) {
+        let parts = spec.split(separator: ",").map(String.init)
+        guard parts.count == 2, let row = RunPlan.Part(rawValue: parts[0]), let after = Double(parts[1]) else {
+            return Log.background.error("PT_TEST_TAP isn't row,after")
+        }
+        Task.detached {
+            try? await Task.sleep(for: .seconds(after))
+            Log.background.info("Test hook: tapping \(row.rawValue, privacy: .public)")
+            await BackupRun.tap(row)
         }
     }
 
