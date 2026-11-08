@@ -9,7 +9,7 @@ final class SQLiteDatabaseTests: XCTestCase {
     override func setUpWithError() throws {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        db = SQLiteDatabase(path: dir.appendingPathComponent("t.sqlite").path)
+        db = try SQLiteDatabase(path: dir.appendingPathComponent("t.sqlite").path)
         db.executeScript("""
             CREATE TABLE t (id TEXT PRIMARY KEY, n REAL, b BLOB);
             CREATE TRIGGER boom BEFORE INSERT ON t WHEN NEW.id LIKE 'boom%' BEGIN SELECT RAISE(ABORT, 'forced'); END;
@@ -23,6 +23,14 @@ final class SQLiteDatabaseTests: XCTestCase {
 
     private func ids() -> [String] {
         db.query("SELECT id FROM t ORDER BY id") { SQLiteDatabase.text($0, 0) ?? "" }
+    }
+
+    func testAFileThatCantBeOpenedThrows() {
+        // A file is in the way of the folder the database would go in.
+        let blocked = dir.appendingPathComponent("blocked")
+        FileManager.default.createFile(atPath: blocked.path, contents: Data())
+        XCTAssertThrowsError(try SQLiteDatabase(path: blocked.appendingPathComponent("t.sqlite").path))
+        XCTAssertThrowsError(try BackupStore(path: blocked.appendingPathComponent("backup.sqlite").path) {})
     }
 
     func testFailedStatementRollsBackTheTransaction() {

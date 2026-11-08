@@ -1,4 +1,5 @@
 import SwiftUI
+import SyncKit
 
 @main
 struct IOSPhotosToolsApp: App {
@@ -53,11 +54,28 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         BackgroundTasks.register()
-        // Reconnect to the background upload session so completions that happened while we were
-        // suspended get delivered.
+        connectUploads()
+        // Launched in the background before the phone was first unlocked, the database can't be
+        // opened until it is.
+        NotificationCenter.default.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.connectUploads()
+        }
+        return true
+    }
+
+    private var uploadsConnected = false
+
+    /// Reconnects to the background upload session so completions that happened while we were
+    /// suspended get delivered, once the store they're recorded in can be opened.
+    private func connectUploads() {
+        guard !uploadsConnected else { return }
+        guard BackupStore.open() != nil else {
+            return Log.background.error("Upload events left for later: the backup database can't be opened")
+        }
+        uploadsConnected = true
         UploadSession.shared.activate()
         BackupEngine.watchUploads()
-        return true
     }
 
     func application(
@@ -67,9 +85,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) {
         guard identifier == UploadSession.identifier else { return completionHandler() }
         Log.background.info("Woken for upload events")
+        guard BackupStore.open() != nil else {
+            // They're delivered when the session is next connected.
+            Log.background.error("Upload events left for later: the backup database can't be opened")
+            return completionHandler()
+        }
         // Called as soon as the events are handled, which records them in the store and nothing
         // more: no network writes, since iOS gives this little time.
         UploadSession.shared.backgroundCompletionHandler = completionHandler
-        UploadSession.shared.activate()
+        connectUploads()
     }
 }

@@ -16,12 +16,26 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private var statementFailed = false
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+    /// The file couldn't be opened, as before the phone's first unlock after a restart, when the
+    /// app's files are still locked.
+    public struct OpenFailure: Error, LocalizedError {
+        public let path: String
+        public let message: String
+
+        public var errorDescription: String? { "Couldn't open the database at \(path): \(message)" }
+    }
+
     /// Opens the database in WAL mode. `synchronous` is SQLite's default (FULL) unless given.
-    public init(path: String, synchronous: Synchronous? = nil) {
-        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
-            fatalError("Could not open database at \(path)")
+    public init(path: String, synchronous: Synchronous? = nil) throws {
+        // Opening doesn't read the file, so switching to WAL is what finds out whether it can be.
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              sqlite3_exec(db, "PRAGMA journal_mode = WAL", nil, nil, nil) == SQLITE_OK
+        else {
+            let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "out of memory"
+            sqlite3_close(db)
+            db = nil
+            throw OpenFailure(path: path, message: message)
         }
-        sqlite3_exec(db, "PRAGMA journal_mode = WAL", nil, nil, nil)
         if let synchronous { sqlite3_exec(db, "PRAGMA synchronous = \(synchronous.rawValue)", nil, nil, nil) }
     }
 

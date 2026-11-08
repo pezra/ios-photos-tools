@@ -1,5 +1,6 @@
 import BackgroundTasks
 import Foundation
+import SyncKit
 
 /// Schedules backup passes whenever iOS lets the app run in the background (on battery or charging).
 /// If the USB drive happens to be plugged in then, it's backed up too. Trip albums are kept up to
@@ -100,6 +101,10 @@ enum BackgroundTasks {
 
     private static func handleTrips(_ task: BGProcessingTask) {
         scheduleTrips()
+        guard BackupStore.open() != nil else {
+            Log.background.error("Trip albums skipped: the backup database can't be opened")
+            return task.setTaskCompleted(success: false)
+        }
         LibrarySnapshot.invalidate()
         task.expirationHandler = {
             Task { @MainActor in TripsModel.shared.stop() }

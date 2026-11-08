@@ -9,7 +9,7 @@ final class DriveListingTests: XCTestCase {
     override func setUpWithError() throws {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: drive, withIntermediateDirectories: true)
-        store = BackupStore(path: dir.appendingPathComponent("backup.sqlite").path) {}
+        store = try BackupStore(path: dir.appendingPathComponent("backup.sqlite").path) {}
     }
 
     override func tearDownWithError() throws {

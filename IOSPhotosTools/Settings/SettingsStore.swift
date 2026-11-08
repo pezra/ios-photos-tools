@@ -53,7 +53,7 @@ final class SettingsStore {
         tripAlbums = d.bool(forKey: Key.tripAlbums)
         syncEnabled = d.bool(forKey: Key.syncEnabled)
         // Opening the database first, since moving to a new layout can forget the drive folder.
-        _ = BackupStore.shared
+        _ = BackupStore.open()
         driveName = DriveDestination.name
         accessKeyID = Keychain.get(Key.accessKeyID) ?? ""
         secretAccessKey = Keychain.get(Key.secretAccessKey) ?? ""

@@ -18,7 +18,7 @@ final class BackupStoreTests: XCTestCase {
     }
 
     private func open() {
-        store = BackupStore(path: path) {}
+        store = try! BackupStore(path: path) {}
     }
 
     /// Runs SQL on its own connection, to set up what the store can't do through its own methods.
@@ -607,10 +607,10 @@ final class BackupStoreTests: XCTestCase {
             """)
     }
 
-    func testUploadedFilesCountAsInTheBucketAfterUpgrading() {
+    func testUploadedFilesCountAsInTheBucketAfterUpgrading() throws {
         seed(version: 1)
         var layoutChanged = false
-        store = BackupStore(path: path) { layoutChanged = true }
+        store = try BackupStore(path: path) { layoutChanged = true }
         XCTAssertFalse(layoutChanged)
         XCTAssertTrue(store.isInBucket("2026/done.heic"))
         XCTAssertFalse(store.isInBucket("2026/pending.heic"))
@@ -635,13 +635,13 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertFalse(store.isInBucket("2026/done.heic"), "version 2 already counted what was there")
     }
 
-    func testOldLayoutStartsOverOnce() {
+    func testOldLayoutStartsOverOnce() throws {
         seed(version: 0)
         var changes = 0
-        store = BackupStore(path: path) { changes += 1 }
+        store = try BackupStore(path: path) { changes += 1 }
         XCTAssertEqual(changes, 1)
         XCTAssertEqual(store.count(.done), 0)
-        store = BackupStore(path: path) { changes += 1 }
+        store = try BackupStore(path: path) { changes += 1 }
         XCTAssertEqual(changes, 1)
     }
 

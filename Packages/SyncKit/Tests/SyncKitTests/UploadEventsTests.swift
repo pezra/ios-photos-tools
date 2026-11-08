@@ -145,7 +145,7 @@ final class UploadEventsTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let store = BackupStore(path: dir.appendingPathComponent("backup.sqlite").path) {}
+        let store = try! BackupStore(path: dir.appendingPathComponent("backup.sqlite").path) {}
         let rows = ["2026/A.HEIC", "2026/A.MOV"].enumerated().map { index, path in
             ResourceRow(id: "a#\(index)", assetID: "a", path: path, s3Key: path)
         }

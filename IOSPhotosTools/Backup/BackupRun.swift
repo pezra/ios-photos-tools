@@ -90,6 +90,10 @@ final class BackupRun: @unchecked Sendable {
     // MARK: - The run
 
     private func start(_ trigger: RunPlan.Trigger, reason: String) {
+        // Before the phone's first unlock, say, in the background. The next run catches up.
+        guard BackupStore.open() != nil else {
+            return Log.run.error("No run for \(reason, privacy: .public): the backup database can't be opened")
+        }
         let now = Date()
         let situation = Situation.now()
         lock.withLock {

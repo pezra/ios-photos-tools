@@ -46,9 +46,9 @@ public final class BackupStore: @unchecked Sendable {
     private var libraryLoaded = false
 
     /// `onLayoutChange` runs if opening this database moves it to a new layout, which everything
-    /// is backed up again for.
-    public init(path: String, onLayoutChange: () -> Void) {
-        db = SQLiteDatabase(path: path)
+    /// is backed up again for. Throws if the database can't be opened.
+    public init(path: String, onLayoutChange: () -> Void) throws {
+        db = try SQLiteDatabase(path: path)
         db.executeScript("""
             CREATE TABLE IF NOT EXISTS assets (
                 id TEXT PRIMARY KEY,

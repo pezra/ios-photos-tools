@@ -12,7 +12,8 @@ final class AnalysisStore: @unchecked Sendable {
     private let db: SQLiteDatabase
 
     private init() {
-        db = SQLiteDatabase(path: AppDirectories.support.appendingPathComponent("analysis.sqlite").path, synchronous: .normal)
+        // Only used in the foreground, where the phone has been unlocked and the file can be opened.
+        db = try! SQLiteDatabase(path: AppDirectories.support.appendingPathComponent("analysis.sqlite").path, synchronous: .normal)
         db.executeScript("""
             CREATE TABLE IF NOT EXISTS analyses (
                 id TEXT PRIMARY KEY,
