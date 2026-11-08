@@ -78,18 +78,10 @@ enum StorageInventory {
     /// told how many objects have been listed so far.
     static func prepareS3(client: S3Client, prefix: String, session: URLSession,
                           progress: ((Int) async -> Void)? = nil) async throws {
+        try noticeBucket(client: client, prefix: prefix)
         let listedAt = store.meta(listedKey(client: client, prefix: prefix)).flatMap(Double.init) ?? 0
         let isFresh = hasListedS3(client: client, prefix: prefix) && !lacksConditionalWrites(client: client, prefix: prefix)
             && Date().timeIntervalSince1970 - listedAt < s3ListingFreshFor
-        // What's been checked in one bucket says nothing about another.
-        let current = identity(client: client, prefix: prefix)
-        let previous = store.meta("current-bucket")
-        if previous != current {
-            // Identities used to leave out the service, so one of those is taken to be this bucket.
-            let isOlderForm = previous == "\(client.config.bucket)/\(prefix)"
-            if previous != nil && !isOlderForm { store.forgetBucketContents() }
-            store.setMeta("current-bucket", current)
-        }
         try await mergeHandledPaths(fromS3: client, prefix: prefix, session: session)
         if isFresh {
             Log.listing.info("Bucket listing reused: listed within \(Int(s3ListingFreshFor)) s")
@@ -97,6 +89,17 @@ enum StorageInventory {
             try await Log.interval("bucket listing") {
                 try await refreshS3(client: client, prefix: prefix, session: session, progress: progress)
             }
+        }
+    }
+
+    /// What's been backed up to one bucket says nothing about another, so switching to a different
+    /// one forgets the backup history and backs everything up to it.
+    static func noticeBucket(client: S3Client, prefix: String) throws {
+        let current = identity(client: client, prefix: prefix)
+        // Identities used to leave out the service, so one of those is taken to be this bucket.
+        let olderForm = "\(client.config.bucket)/\(prefix)"
+        if try store.useBucket(current, olderForm: olderForm, listedKey: listedKey(client: client, prefix: prefix)) {
+            Log.pass.info("Bucket changed to \(current, privacy: .public): backup history forgotten")
         }
     }
 

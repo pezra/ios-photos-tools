@@ -72,6 +72,13 @@ actor BackupEngine {
         defer { session.finishTasksAndInvalidate() }
 
         await report(phase: "Checking library…", running: true, startingPass: !isRetry)
+        // Before finding what's pending, since a new bucket has nothing in it yet.
+        do {
+            try StorageInventory.noticeBucket(client: client, prefix: settings.prefix)
+        } catch {
+            await report(phase: "Couldn't save the backup history", running: false, error: error.localizedDescription)
+            return
+        }
         await reconcileWithUploadSession()
 
         let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedAssets())
@@ -164,9 +171,9 @@ actor BackupEngine {
             let isEdit = PhotoLibrary.editedTypes.contains(resource.type)
             if previous?.state == .done && !isEdit { continue }
             let inBucket = store.inventoryEntries(for: row.path).first { $0.source == .s3 }
-            // Having a path doesn't mean what's there is this photo's: it may have been chosen on
-            // a pass to the drive, or before switching buckets.
-            let isOwn = previous?.state == .done || store.isInBucket(row.path)
+            let plan = BucketUpload(previous: previous?.state, knownInBucket: store.isInBucket(row.path),
+                                    inListing: inBucket != nil, isEdit: isEdit, conditionalWrites: conditionalWrites)
+            let isOwn = plan.isOwn
             // Already at its own path in the bucket, as when reinstalling loses the upload history.
             if isOwn && !isEdit && inBucket != nil {
                 store.markDone(row.id)
@@ -188,7 +195,7 @@ actor BackupEngine {
                 Staging.remove(stagedName)
                 continue
             }
-            if previous?.state != .done, let inBucket, let sha256 {
+            if plan.compares, let inBucket, let sha256 {
                 let matches: Bool?
                 if let size = file.fileSize, size != inBucket.size {
                     matches = false
@@ -221,7 +228,7 @@ actor BackupEngine {
                 contentType: PhotoLibrary.contentType(of: resource),
                 resourceID: row.id,
                 allowCellular: settings.allowCellular,
-                mustNotExist: conditionalWrites && (!isEdit || !isOwn)
+                mustNotExist: plan.mustNotExist
             )
         }
         // Records the new modification date when nothing needed uploading.

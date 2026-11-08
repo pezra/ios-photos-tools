@@ -269,14 +269,39 @@ public final class BackupStore: @unchecked Sendable {
 
     /// Forgets all history so everything is uploaded again (e.g. after switching buckets).
     public func reset() {
-        locked {
-            execute("DELETE FROM resources WHERE state != ?", [ResourceState.uploading.rawValue])
-            // These can't be stopped, and may be headed for the old bucket, so finishing mustn't
-            // count: they're sent again instead.
-            execute("UPDATE resources SET superseded = 1 WHERE state = ?", [ResourceState.uploading.rawValue])
-            execute("DELETE FROM assets")
+        locked { _ = handledTransaction { forgetBucketHistory() } }
+    }
+
+    /// Makes `identity` the bucket backed up to. Switching from another bucket forgets the history,
+    /// as `reset` does, and the listing, so everything is checked against the new one and backed up
+    /// to it. `olderForm` is how this bucket's identity used to be written, which isn't a switch.
+    /// `listedKey` is the meta key saying when this bucket was last listed, which a listing of
+    /// another one replaced. Returns whether the history was forgotten.
+    public func useBucket(_ identity: String, olderForm: String, listedKey: String) throws -> Bool {
+        try locked {
+            let previous = query("SELECT value FROM meta WHERE key = 'current-bucket'") { text($0, 0) }.first ?? nil
+            guard previous != identity else { return false }
+            let forgets = previous != nil && previous != olderForm
+            let saved = transaction {
+                execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('current-bucket', ?)", [identity])
+                guard forgets else { return }
+                forgetBucketHistory()
+                execute("DELETE FROM remote_files WHERE source = ?", [StorageSource.s3.rawValue])
+                execute("DELETE FROM meta WHERE key = ?", [listedKey])
+                bumpHandledVersion()
+            }
+            guard saved else { throw Failure.couldNotSave }
+            return forgets
         }
-        forgetBucketContents()
+    }
+
+    private func forgetBucketHistory() {
+        execute("DELETE FROM resources WHERE state != ?", [ResourceState.uploading.rawValue])
+        // These can't be stopped, and may be headed for the old bucket, so finishing mustn't
+        // count: they're sent again instead.
+        execute("UPDATE resources SET superseded = 1 WHERE state = ?", [ResourceState.uploading.rawValue])
+        execute("DELETE FROM assets")
+        execute("UPDATE handled_paths SET on_bucket = 0 WHERE on_bucket != 0")
     }
 
     /// Nothing is known to be in a new bucket yet, so a file found at a photo's path has to be
@@ -703,10 +728,10 @@ public final class BackupStore: @unchecked Sendable {
             """, [assetID, now, assetID])
     }
 
-    private func locked<T>(_ body: () -> T) -> T {
+    private func locked<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock()
         defer { lock.unlock() }
-        return body()
+        return try body()
     }
 
     /// All or nothing: if a statement fails or `body` throws, the rest is skipped and things are

@@ -184,6 +184,76 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertNil(store.completedAssets()["a"])
     }
 
+    // MARK: - Switching buckets
+
+    private func useBucket(_ name: String, olderForm: String? = nil) -> Bool {
+        (try? store.useBucket("svc/\(name)/p", olderForm: olderForm ?? "\(name)/p", listedKey: "listed-s3-svc/\(name)/p")) ?? false
+    }
+
+    /// How staging would treat a file that something in the bucket's listing is at.
+    private func plan(_ asset: String, _ id: String, _ path: String, isEdit: Bool) -> BucketUpload {
+        BucketUpload(previous: state(asset, id), knownInBucket: store.isInBucket(path), inListing: true,
+                     isEdit: isEdit, conditionalWrites: true)
+    }
+
+    /// A backed-up photo with an edit, in bucket A.
+    private func backUpToA() {
+        XCTAssertFalse(useBucket("A"), "nothing to forget the first time")
+        add([row("a#1", "a", "2026/A.HEIC"), row("a#e", "a", "2026/A-edited.jpg")], asset: "a")
+        upload("a#1", "a#e")
+        store.markDone("a#1")
+        store.markDone("a#e")
+        XCTAssertTrue(store.addInventory(source: .s3, entries: [entry("2026/A.HEIC"), entry("2026/A-edited.jpg")]))
+        XCTAssertTrue(store.addInventory(source: .drive, entries: [InventoryEntry(source: .drive, path: "2026/A.HEIC", size: 1)]))
+        store.setMeta("listed-s3-svc/B/p", "1")
+        XCTAssertFalse(plan("a", "a#e", "2026/A-edited.jpg", isEdit: true).mustNotExist, "its own older edit is replaced")
+    }
+
+    func testSwitchingBucketsBacksEverythingUpToTheNewOne() {
+        open()
+        backUpToA()
+        XCTAssertTrue(useBucket("B"))
+        XCTAssertNil(store.completedAssets()["a"])
+        XCTAssertNil(state("a", "a#1"))
+        XCTAssertFalse(store.isInBucket("2026/A.HEIC"))
+        XCTAssertEqual(store.paths(forAsset: "a")["a#1"], "2026/A.HEIC", "keeps its paths")
+        XCTAssertEqual(store.inventory().map(\.source), [.drive], "A's listing isn't B's")
+        XCTAssertNil(store.meta("listed-s3-svc/B/p"), "so B is listed again")
+
+        // The edit is re-registered on the next pass. Whatever B has at its path is someone else's.
+        store.register([row("a#e", "a", "2026/A-edited.jpg")], assetID: "a", assetModifiedAt: 6)
+        let edit = plan("a", "a#e", "2026/A-edited.jpg", isEdit: true)
+        XCTAssertFalse(edit.isOwn)
+        XCTAssertTrue(edit.compares)
+        XCTAssertTrue(edit.mustNotExist)
+        XCTAssertFalse(useBucket("B"), "only once")
+    }
+
+    func testOlderFormOfTheSameBucketKeepsItsHistory() {
+        open()
+        XCTAssertFalse(try store.useBucket("A/p", olderForm: "A/p", listedKey: "listed-s3-A/p"))
+        add([row("a#1", "a", "2026/A.HEIC")], asset: "a")
+        upload("a#1")
+        store.markDone("a#1")
+        XCTAssertFalse(useBucket("A"))
+        XCTAssertEqual(state("a", "a#1"), .done)
+        XCTAssertTrue(store.isInBucket("2026/A.HEIC"))
+        XCTAssertNotNil(store.completedAssets()["a"])
+    }
+
+    func testUploadToTheOldBucketFinishingAfterASwitchIsSentAgain() {
+        open()
+        XCTAssertFalse(useBucket("A"))
+        add([row("a#1", "a", "2026/A.HEIC")], asset: "a")
+        upload("a#1")
+        XCTAssertTrue(useBucket("B"))
+        XCTAssertEqual(state("a", "a#1"), .uploading)
+        store.markDone("a#1")
+        XCTAssertEqual(state("a", "a#1"), .pending)
+        XCTAssertFalse(store.isInBucket("2026/A.HEIC"))
+        XCTAssertNil(store.completedAssets()["a"])
+    }
+
     // MARK: - Files that are gone
 
     func testRevertedEditLetsItsPhotoComplete() {
