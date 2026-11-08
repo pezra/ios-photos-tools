@@ -181,11 +181,16 @@ actor LibrarySyncEngine {
     /// drive takes a while, and pausing has to be able to get through.
     private nonisolated func prepareInventory(_ sources: Sources) async throws -> Bool {
         if let drive = sources.drive {
-            try StorageInventory.prepareDrive(root: drive.root, driveID: drive.id)
+            // Counted as progress, since iOS ends a continued task whose progress stops moving.
+            try await StorageInventory.prepareDrive(root: drive.root, driveID: drive.id) { found in
+                await self.report(phase: "Reading drive… \(found.formatted()) files", running: true, done: found, total: found + 1)
+            }
         }
         guard let bucket = sources.bucket else { return false }
         do {
-            try await StorageInventory.prepareS3(client: bucket.client, prefix: bucket.prefix, session: bucket.session)
+            try await StorageInventory.prepareS3(client: bucket.client, prefix: bucket.prefix, session: bucket.session) { listed in
+                await self.report(phase: "Listing bucket… \(listed.formatted()) files", running: true, done: listed, total: listed + 1)
+            }
             return true
         } catch {
             if sources.drive == nil { throw error }

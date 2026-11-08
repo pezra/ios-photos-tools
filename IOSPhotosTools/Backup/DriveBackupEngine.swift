@@ -19,6 +19,9 @@ actor DriveBackupEngine {
     /// Set while iOS is letting the pass continue in the background; shows progress to the user.
     private var continuedTask: BGContinuedProcessingTask?
     private var progress = (done: 0, total: 0)
+    /// Files listed so far this pass. iOS ends a continued task whose progress stops moving, and
+    /// listing a big drive or bucket takes minutes, so these count as work done.
+    private var listed = (drive: 0, bucket: 0)
 
     /// Starts a pass if one isn't running. Called from the foreground, it also asks iOS to let the
     /// pass carry on when the app is closed.
@@ -51,8 +54,17 @@ actor DriveBackupEngine {
 
     private func setProgress(_ done: Int, of total: Int) {
         progress = (done, total)
-        continuedTask?.progress.totalUnitCount = Int64(total)
-        continuedTask?.progress.completedUnitCount = Int64(done)
+        let offset = listed.drive + listed.bucket
+        continuedTask?.progress.totalUnitCount = Int64(offset + total)
+        continuedTask?.progress.completedUnitCount = Int64(offset + done)
+    }
+
+    private func showListing(drive: Int? = nil, bucket: Int? = nil) async {
+        if let drive { listed.drive = drive }
+        if let bucket { listed.bucket = bucket }
+        setProgress(progress.done, of: progress.total)
+        let phase = bucket.map { "Listing bucket… \($0.formatted()) files" } ?? "Reading drive… \(listed.drive.formatted()) files"
+        await report(phase: phase, running: true)
     }
 
     private func startPass() -> (task: Task<Void, Never>, isNew: Bool) {
@@ -80,6 +92,7 @@ actor DriveBackupEngine {
         await report(phase: "Checking library…", running: true, startingPass: true)
         let (pending, libraryIDs) = PhotoLibrary.pendingAssets(completed: store.completedDriveAssets(driveID: driveID))
         store.setLibraryAssets(libraryIDs)
+        listed = (0, 0)
         setProgress(0, of: pending.count)
 
         // Names are checked against what's on the drive and in the bucket so nothing is overwritten.
@@ -87,7 +100,8 @@ actor DriveBackupEngine {
             do {
                 try await prepareInventory(root: root, driveID: driveID)
             } catch {
-                return await report(phase: "Couldn't check what's in storage", running: false, error: error.localizedDescription)
+                return await report(phase: Task.isCancelled ? "Paused" : "Couldn't check what's in storage", running: false,
+                                    error: Task.isCancelled ? nil : error.localizedDescription)
             }
         }
 
@@ -129,19 +143,26 @@ actor DriveBackupEngine {
 
     private func showSyncProgress(_ phase: String, done: Int, total: Int) {
         continuedTask?.updateTitle(DriveBackgroundTask.syncTitle, subtitle: phase)
+        listed = (0, 0)
         setProgress(done, of: total)
     }
 
     /// Off the actor because walking the drive takes a while, and pausing has to be able to get through.
     private nonisolated func prepareInventory(root: URL, driveID: String) async throws {
-        try StorageInventory.prepareDrive(root: root, driveID: driveID)
+        await showListing(drive: 0)
+        try await StorageInventory.prepareDrive(root: root, driveID: driveID) { found in
+            await self.showListing(drive: found)
+        }
         // The bucket's last listing will do if it can't be reached now, but there must be one.
         guard let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3),
               !StorageInventory.hasListedS3(client: client, prefix: settings.prefix)
         else { return }
         let session = settings.bucketSession()
         defer { session.finishTasksAndInvalidate() }
-        try await StorageInventory.prepareS3(client: client, prefix: settings.prefix, session: session)
+        await showListing(bucket: 0)
+        try await StorageInventory.prepareS3(client: client, prefix: settings.prefix, session: session) { listed in
+            await self.showListing(bucket: listed)
+        }
     }
 
     /// Whether the file at `existing` has the same contents as `resource`.

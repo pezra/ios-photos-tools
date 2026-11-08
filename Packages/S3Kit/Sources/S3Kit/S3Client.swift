@@ -230,10 +230,13 @@ public struct S3Client: Sendable {
     }
 
     /// Every object whose key starts with `prefix`. Needs `s3:ListBucket`.
-    public func listObjects(prefix: String, session: URLSession = .shared) async throws -> [S3Object] {
+    /// `progress` is told how many objects have been listed after each page.
+    public func listObjects(prefix: String, session: URLSession = .shared,
+                            progress: ((Int) async -> Void)? = nil) async throws -> [S3Object] {
         var objects: [S3Object] = []
         var token: String?
         repeat {
+            try Task.checkCancellation()
             var query = [("list-type", "2"), ("prefix", prefix)]
             if let token { query.append(("continuation-token", token)) }
             let request = signedRequest(method: "GET", key: nil, query: query, payloadHash: SigV4.sha256Hex(Data()))
@@ -241,6 +244,7 @@ public struct S3Client: Sendable {
             let page = try S3ListPage(xml: try checked(body, response))
             objects += page.objects
             token = page.nextContinuationToken
+            await progress?(objects.count)
         } while token != nil
         return objects
     }

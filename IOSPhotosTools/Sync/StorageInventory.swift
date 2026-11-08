@@ -22,23 +22,30 @@ enum StorageInventory {
 
     // MARK: - Drive
 
-    /// Brings the record of handled paths and the listing of the drive up to date.
-    static func prepareDrive(root: URL, driveID: String) throws {
+    /// Brings the record of handled paths and the listing of the drive up to date. `progress` is
+    /// told how many files have been found so far, since a big drive takes minutes to list.
+    static func prepareDrive(root: URL, driveID: String, progress: ((Int) async -> Void)? = nil) async throws {
         try mergeHandledPaths(fromDrive: root, driveID: driveID)
-        try refreshDrive(root: root)
+        try await refreshDrive(root: root, progress: progress)
     }
 
-    private static func refreshDrive(root: URL) throws {
-        let entries = walk(root: root)
+    private static func refreshDrive(root: URL, progress: ((Int) async -> Void)?) async throws {
+        let entries = try await walk(root: root, progress: progress)
         // A walk cut short by the drive being unplugged would look like missing files.
         guard (try? root.checkResourceIsReachable()) == true else { throw CocoaError(.fileNoSuchFile) }
         guard store.replaceInventory(source: .drive, entries: entries) else { throw Failure.couldNotSave }
     }
 
-    private static func walk(root: URL) -> [InventoryEntry] {
+    private static func walk(root: URL, progress: ((Int) async -> Void)?) async throws -> [InventoryEntry] {
         guard let enumerator = FileManager.default.enumerator(atPath: root.path) else { return [] }
         var entries: [InventoryEntry] = []
+        var visited = 0
         for case let path as String in enumerator {
+            visited += 1
+            if visited % 500 == 0 {
+                try Task.checkCancellation()
+                await progress?(entries.count)
+            }
             guard enumerator.fileAttributes?[.type] as? FileAttributeType == .typeRegular,
                   LibraryPath.isLibraryContent(path),
                   let size = enumerator.fileAttributes?[.size] as? NSNumber
@@ -80,8 +87,10 @@ enum StorageInventory {
 
     // MARK: - Bucket
 
-    /// Brings the record of handled paths and the listing of the bucket up to date.
-    static func prepareS3(client: S3Client, prefix: String, session: URLSession) async throws {
+    /// Brings the record of handled paths and the listing of the bucket up to date. `progress` is
+    /// told how many objects have been listed so far.
+    static func prepareS3(client: S3Client, prefix: String, session: URLSession,
+                          progress: ((Int) async -> Void)? = nil) async throws {
         // What's been checked in one bucket says nothing about another.
         let current = identity(client: client, prefix: prefix)
         let previous = store.meta("current-bucket")
@@ -90,12 +99,13 @@ enum StorageInventory {
             store.setMeta("current-bucket", current)
         }
         try await mergeHandledPaths(fromS3: client, prefix: prefix, session: session)
-        try await refreshS3(client: client, prefix: prefix, session: session)
+        try await refreshS3(client: client, prefix: prefix, session: session, progress: progress)
     }
 
-    private static func refreshS3(client: S3Client, prefix: String, session: URLSession) async throws {
+    private static func refreshS3(client: S3Client, prefix: String, session: URLSession,
+                                  progress: ((Int) async -> Void)?) async throws {
         let root = prefix.isEmpty ? "" : "\(prefix)/"
-        let objects = try await client.listObjects(prefix: root, session: session)
+        let objects = try await client.listObjects(prefix: root, session: session, progress: progress)
         let entries = objects.compactMap { object -> InventoryEntry? in
             let path = String(object.key.dropFirst(root.count))
             return LibraryPath.isLibraryContent(path) ? InventoryEntry(source: .s3, path: path, size: object.size) : nil
