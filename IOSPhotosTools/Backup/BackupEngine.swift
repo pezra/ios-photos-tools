@@ -18,10 +18,10 @@ actor BackupEngine {
     private let uploadStallLimit: Duration = .seconds(120)
 
     private let store = BackupStore.shared
-    private var currentPass: Task<Void, Never>?
+    private let runner = PassRunner()
 
     nonisolated static func start() {
-        Task { _ = await shared.startPass() }
+        Task { await shared.startPass() }
     }
 
     nonisolated static func stop() {
@@ -31,39 +31,32 @@ actor BackupEngine {
     /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
     /// stops the pass.
     func run() async {
-        await withTaskCancellationHandler { await startPass().value } onCancel: { Self.stop() }
+        await runner.run(onEnd: { Self.passEnded(cancelled: $0) }) { await self.performPass() }
     }
 
     func cancel() {
-        currentPass?.cancel()
+        runner.cancel()
     }
 
     /// "Forget backup history". Stops the pass first and waits for it, since forgetting a file
     /// between staging it and starting its upload would leave the upload with nothing to record it.
     /// A pass that was stopped starts again.
     func forgetHistory() async {
-        var stopped = false
-        while let currentPass {
-            stopped = true
-            currentPass.cancel()
-            await currentPass.value
-        }
+        let stopped = await runner.cancelAndWait()
         store.reset()
         Log.pass.info("Backup history forgotten")
         await MainActor.run { BackupStatus.shared.refreshCounts() }
-        if stopped { _ = startPass() }
+        if stopped { startPass() }
     }
 
-    private func startPass() -> Task<Void, Never> {
-        if let currentPass { return currentPass }
-        let pass = Task {
-            await performPass()
-            currentPass = nil
-            // Even if this pass couldn't back anything up: syncing can still work from the drive.
-            if !Task.isCancelled { LibrarySyncEngine.start() }
-        }
-        currentPass = pass
-        return pass
+    @discardableResult
+    private func startPass() -> Bool {
+        runner.start(onEnd: { Self.passEnded(cancelled: $0) }) { await self.performPass() }.isNew
+    }
+
+    private static func passEnded(cancelled: Bool) {
+        // Even if this pass couldn't back anything up: syncing can still work from the drive.
+        if !cancelled { LibrarySyncEngine.start() }
     }
 
     /// `isRetry` is for the one extra pass given to uploads that have to be sent again.
@@ -299,18 +292,7 @@ actor BackupEngine {
     private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false) async {
         Log.pass.log(phase: phase, of: "bucket", running: running, startingPass: startingPass)
         await MainActor.run {
-            let status = BackupStatus.shared
-            status.phase = phase
-            status.isRunning = running
-            if startingPass {
-                status.lastError = nil
-            } else if finished {
-                status.lastFinished = Date()
-                status.lastError = error
-            } else if let error {
-                status.lastError = error
-            }
-            status.refreshCounts()
+            BackupStatus.shared.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
         }
     }
 }

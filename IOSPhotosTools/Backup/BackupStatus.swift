@@ -9,25 +9,23 @@ import SyncKit
 final class BackupStatus {
     static let shared = BackupStatus()
 
-    var isRunning = false
-    var phase = "Idle"
+    private var pass = PassStatus(lastFinishedKey: "lastFinished")
+    var isRunning: Bool { pass.isRunning }
+    var phase: String { pass.phase }
+    var lastError: String? { pass.lastError }
+    var lastFinished: Date? { pass.lastFinished }
     /// Saved so the last counts show at launch while the library is being listed.
     var coverage: BackupStore.Coverage {
         didSet { UserDefaults.standard.set(try? JSONEncoder().encode(coverage), forKey: "coverage") }
     }
     var uploading = 0
     var failed = 0
-    var lastError: String?
-    var lastFinished: Date? {
-        didSet { UserDefaults.standard.set(lastFinished, forKey: "lastFinished") }
-    }
     var authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
 
     private var listingLibrary = false
     private var coverageRefreshScheduled = false
 
     private init() {
-        lastFinished = UserDefaults.standard.object(forKey: "lastFinished") as? Date
         coverage = UserDefaults.standard.data(forKey: "coverage")
             .flatMap { try? JSONDecoder().decode(BackupStore.Coverage.self, from: $0) } ?? BackupStore.Coverage()
     }
@@ -52,6 +50,11 @@ final class BackupStatus {
                 status.refreshCounts()
             }
         }
+    }
+
+    func report(phase: String, running: Bool, error: String?, finished: Bool, startingPass: Bool) {
+        pass.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
+        refreshCounts()
     }
 
     func refreshCounts() {
@@ -83,17 +86,18 @@ final class BackupStatus {
 final class SyncStatus {
     static let shared = SyncStatus()
 
-    var isRunning = false
-    var phase = "Idle"
+    private var pass = PassStatus(lastFinishedKey: "syncLastFinished")
+    var isRunning: Bool { pass.isRunning }
+    var phase: String { pass.phase }
+    var lastError: String? { pass.lastError }
+    var lastFinished: Date? { pass.lastFinished }
     var remaining = 0
     var failed = 0
-    var lastError: String?
-    var lastFinished: Date? {
-        didSet { UserDefaults.standard.set(lastFinished, forKey: "syncLastFinished") }
-    }
 
-    private init() {
-        lastFinished = UserDefaults.standard.object(forKey: "syncLastFinished") as? Date
+    private init() {}
+
+    func report(phase: String, running: Bool, error: String?, finished: Bool, startingPass: Bool) {
+        pass.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
     }
 }
 
@@ -104,14 +108,15 @@ final class DriveStatus {
     static let shared = DriveStatus()
 
     var isConnected = false
-    var isRunning = false
-    var phase = "Idle"
-    var lastError: String?
-    var lastFinished: Date? {
-        didSet { UserDefaults.standard.set(lastFinished, forKey: "driveLastFinished") }
-    }
+    private var pass = PassStatus(lastFinishedKey: "driveLastFinished")
+    var isRunning: Bool { pass.isRunning }
+    var phase: String { pass.phase }
+    var lastError: String? { pass.lastError }
+    var lastFinished: Date? { pass.lastFinished }
 
-    private init() {
-        lastFinished = UserDefaults.standard.object(forKey: "driveLastFinished") as? Date
+    private init() {}
+
+    func report(phase: String, running: Bool, error: String?, finished: Bool, startingPass: Bool) {
+        pass.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
     }
 }

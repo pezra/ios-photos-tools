@@ -19,12 +19,12 @@ actor LibrarySyncEngine {
     private let store = BackupStore.shared
     private let batchSize = 20
     private let minimumFreeBytes: Int64 = 10_000_000_000
-    private var currentPass: Task<Void, Never>?
+    private let runner = PassRunner()
     /// Lets a pass running under a system background task show its progress there.
-    private var progressHandler: (@Sendable (String, Int, Int) -> Void)?
+    private var progressHandler: (id: UUID, call: @Sendable (String, Int, Int) -> Void)?
 
     nonisolated static func start() {
-        Task { _ = await shared.startPass() }
+        Task { await shared.startPass() }
     }
 
     /// Starts from the UI, through the drive pass if the drive's here, which keeps going when the
@@ -42,23 +42,19 @@ actor LibrarySyncEngine {
     /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
     /// stops the pass.
     func run(onProgress: (@Sendable (String, Int, Int) -> Void)? = nil) async {
-        if let onProgress { progressHandler = onProgress }
-        await withTaskCancellationHandler { await startPass().value } onCancel: { Self.stop() }
-        progressHandler = nil
+        // Only the caller that set the handler clears it, so a caller without one doesn't drop another's.
+        let id = UUID()
+        if let onProgress { progressHandler = (id, onProgress) }
+        await runner.run { await self.performPass() }
+        if progressHandler?.id == id { progressHandler = nil }
     }
 
     func cancel() {
-        currentPass?.cancel()
+        runner.cancel()
     }
 
-    private func startPass() -> Task<Void, Never> {
-        if let currentPass { return currentPass }
-        let pass = Task {
-            await performPass()
-            currentPass = nil
-        }
-        currentPass = pass
-        return pass
+    private func startPass() {
+        runner.start { await self.performPass() }
     }
 
     // MARK: - Preview
@@ -394,19 +390,9 @@ actor LibrarySyncEngine {
 
     private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false, done: Int? = nil, total: Int? = nil) async {
         Log.pass.log(phase: phase, of: "sync", running: running, startingPass: startingPass)
-        if let done, let total { progressHandler?(phase, done, total) }
+        if let done, let total { progressHandler?.call(phase, done, total) }
         await MainActor.run {
-            let status = SyncStatus.shared
-            status.phase = phase
-            status.isRunning = running
-            if startingPass {
-                status.lastError = nil
-            } else if finished {
-                status.lastFinished = Date()
-                status.lastError = error
-            } else if let error {
-                status.lastError = error
-            }
+            SyncStatus.shared.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
         }
     }
 

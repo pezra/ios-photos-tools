@@ -16,6 +16,9 @@ import Photos
 ///   each time, so each launch gives them new edited versions.
 /// - `PT_TEST_FORGET_AFTER`: a number of photos. Once the bucket pass has registered that many,
 ///   "Forget backup history" is tapped, while the last of them is still being staged.
+/// - `PT_TEST_PAUSE`: `row,after,resume` where row is `bucket`, `drive` or `sync`, and both times are
+///   seconds. Taps that row's pause button `after` seconds after launch and its resume button
+///   `resume` seconds later. Several can be given, separated by semicolons.
 enum TestHooks {
     private struct Settings: Decodable {
         var endpoint: String?
@@ -56,8 +59,36 @@ enum TestHooks {
         if let name = environment["PT_TEST_DRIVE"] {
             applyDrive(name)
         }
+        if let spec = environment["PT_TEST_PAUSE"] {
+            for part in spec.split(separator: ";") { pauseAndResume(String(part)) }
+        }
         if let count = environment["PT_TEST_EDIT"].flatMap(Int.init) {
             Task.detached { await editPhotos(count) }
+        }
+    }
+
+    private static func pauseAndResume(_ spec: String) {
+        let parts = spec.split(separator: ",").map(String.init)
+        guard parts.count == 3, let after = Double(parts[1]), let resume = Double(parts[2]) else {
+            return Log.background.error("PT_TEST_PAUSE isn't row,after,resume")
+        }
+        let row = parts[0]
+        Task.detached {
+            try? await Task.sleep(for: .seconds(after))
+            Log.background.info("Test hook: pausing \(row, privacy: .public)")
+            switch row {
+            case "bucket": BackupEngine.stop()
+            case "drive": DriveBackupEngine.stop()
+            case "sync": LibrarySyncEngine.stop()
+            default: return
+            }
+            try? await Task.sleep(for: .seconds(resume))
+            Log.background.info("Test hook: resuming \(row, privacy: .public)")
+            switch row {
+            case "bucket": BackupEngine.start()
+            case "drive": await DriveBackupEngine.start()
+            default: LibrarySyncEngine.startFromUI()
+            }
         }
     }
 

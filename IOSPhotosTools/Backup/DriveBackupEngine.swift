@@ -15,7 +15,7 @@ actor DriveBackupEngine {
     static let shared = DriveBackupEngine()
 
     private let store = BackupStore.shared
-    private var currentPass: Task<Void, Never>?
+    private let runner = PassRunner()
     /// Set while iOS is letting the pass continue in the background; shows progress to the user.
     private var continuedTask: BGContinuedProcessingTask?
     private var progress = (done: 0, total: 0)
@@ -35,7 +35,7 @@ actor DriveBackupEngine {
     @MainActor static func start() {
         let inForeground = UIApplication.shared.applicationState == .active
         Task {
-            if await shared.startPass().isNew, inForeground {
+            if await shared.startPass(), inForeground {
                 await MainActor.run { DriveBackgroundTask.request() }
             }
         }
@@ -48,17 +48,17 @@ actor DriveBackupEngine {
     /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
     /// stops the pass.
     func run() async {
-        await withTaskCancellationHandler { await startPass().task.value } onCancel: { Self.stop() }
+        await runner.run(onEnd: { _ in await self.passEnded() }) { await self.performPass() }
     }
 
     func cancel() {
-        currentPass?.cancel()
+        runner.cancel()
     }
 
     /// Shows the pass in progress under `task` and waits for it to end. Returns at once if that
     /// pass has already ended, rather than starting another, or if another task is showing it.
     func follow(_ task: BGContinuedProcessingTask) async {
-        guard let currentPass, continuedTask == nil else { return }
+        guard runner.isRunning, continuedTask == nil else { return }
         continuedTask = task
         showProgress()
         heartbeat = Task {
@@ -67,7 +67,7 @@ actor DriveBackupEngine {
                 nudge()
             }
         }
-        await currentPass.value
+        await runner.join()
     }
 
     private func setProgress(_ done: Int, of total: Int) {
@@ -94,17 +94,15 @@ actor DriveBackupEngine {
         await report(phase: phase, running: true)
     }
 
-    private func startPass() -> (task: Task<Void, Never>, isNew: Bool) {
-        if let currentPass { return (currentPass, false) }
-        let pass = Task {
-            await performPass()
-            heartbeat?.cancel()
-            heartbeat = nil
-            continuedTask = nil
-            currentPass = nil
-        }
-        currentPass = pass
-        return (pass, true)
+    /// Whether this started a pass, rather than joining the one in progress.
+    private func startPass() -> Bool {
+        runner.start(onEnd: { _ in await self.passEnded() }) { await self.performPass() }.isNew
+    }
+
+    private func passEnded() {
+        heartbeat?.cancel()
+        heartbeat = nil
+        continuedTask = nil
     }
 
     private func performPass() async {
@@ -278,17 +276,7 @@ actor DriveBackupEngine {
         Log.pass.log(phase: phase, of: "drive", running: running, startingPass: startingPass)
         continuedTask?.updateTitle(DriveBackgroundTask.title, subtitle: phase)
         await MainActor.run {
-            let status = DriveStatus.shared
-            status.phase = phase
-            status.isRunning = running
-            if startingPass {
-                status.lastError = nil
-            } else if finished {
-                status.lastFinished = Date()
-                status.lastError = error
-            } else if let error {
-                status.lastError = error
-            }
+            DriveStatus.shared.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
             BackupStatus.shared.refreshCounts()
         }
     }
