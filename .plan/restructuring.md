@@ -629,6 +629,12 @@ hangs report).
 
 - Appended deltas for the handled-paths file.
 - Bulk attribute reads in the drive listing, which conflict with the checkpointed, sorted listing.
+- Found in step 5, for later:
+  - An edit refused with 412 (its upload landed but the response was lost) moves to the next edit
+    name, leaving an extra copy: naming adopts originals only. Needs a content check on released
+    edit paths during naming.
+  - Superseded uploads still in flight to an old endpoint hold foreground slots until the 120 s
+    slot limit. Cancelling superseded tasks would free them.
 
 ---
 
