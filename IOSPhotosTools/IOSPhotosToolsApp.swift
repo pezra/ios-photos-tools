@@ -7,6 +7,7 @@ struct IOSPhotosToolsApp: App {
     @State private var status = BackupStatus.shared
     @State private var settings = SettingsStore()
     @State private var drive = DriveStatus.shared
+    @State private var sync = SyncStatus.shared
 
     var body: some Scene {
         WindowGroup {
@@ -14,12 +15,15 @@ struct IOSPhotosToolsApp: App {
                 .environment(status)
                 .environment(settings)
                 .environment(drive)
+                .environment(sync)
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
                 status.refresh()
-                if settings.autoBackup { BackupEngine.start() }
+                // A backup pass ends by syncing, so that new backups count as dealt with first.
+                if settings.autoBackup { BackupEngine.start() } else { LibrarySyncEngine.start() }
+                if settings.tripAlbums { TripsModel.shared.start() }
                 DriveMonitor.shared.start()
             case .background:
                 DriveMonitor.shared.stop()

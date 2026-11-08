@@ -1,10 +1,12 @@
 import Photos
 import SwiftUI
+import SyncKit
 
 struct ContentView: View {
     @Environment(BackupStatus.self) private var status
     @Environment(SettingsStore.self) private var settings
     @Environment(DriveStatus.self) private var drive
+    @Environment(SyncStatus.self) private var sync
     @State private var showingSettings = false
 
     var body: some View {
@@ -49,8 +51,20 @@ struct ContentView: View {
                     Text(footer)
                 }
 
+                if settings.syncEnabled {
+                    Section {
+                        syncRow
+                    } header: {
+                        Text("Sync to phone")
+                    } footer: {
+                        Text("Smaller copies of the pictures in storage, in the \(LibrarySyncEngine.albumTitle) album. They aren't backed up, and ones you delete don't come back.")
+                    }
+                }
+
                 Section {
                     NavigationLink("Find duplicate photos") { CleanupView() }
+                        .disabled(!PhotoLibrary.isAuthorized)
+                    NavigationLink("Trip albums") { TripsView() }
                         .disabled(!PhotoLibrary.isAuthorized)
                 } footer: {
                     Text("Photos you delete stay in your bucket if they've already been backed up.")
@@ -108,6 +122,25 @@ struct ContentView: View {
         )
     }
 
+    private var syncRow: some View {
+        DestinationRow(
+            title: "This phone",
+            systemImage: "iphone",
+            phase: sync.phase,
+            details: [
+                sync.isRunning && sync.remaining > 0 ? "\(sync.remaining) to go" : nil,
+                sync.failed > 0 ? "\(sync.failed) failed (will retry)" : nil,
+            ],
+            lastFinished: sync.lastFinished,
+            error: sync.lastError,
+            isRunning: sync.isRunning,
+            canStart: PhotoLibrary.hasFullAccess,
+            startTitle: "Sync now",
+            start: { LibrarySyncEngine.startFromUI() },
+            stop: { LibrarySyncEngine.stop() }
+        )
+    }
+
     private var footer: String {
         var parts: [String] = []
         if settings.isConfigured {
@@ -124,6 +157,7 @@ struct ContentView: View {
             _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
             status.refresh()
             if settings.autoBackup { BackupEngine.start() }
+            if settings.tripAlbums { TripsModel.shared.start() }
         } else {
             status.refresh()
         }
@@ -212,6 +246,7 @@ private struct DestinationRow: View {
     let error: String?
     let isRunning: Bool
     let canStart: Bool
+    var startTitle = "Back up now"
     let start: () -> Void
     let stop: () -> Void
 
@@ -223,7 +258,7 @@ private struct DestinationRow: View {
                 if isRunning {
                     Button("Pause", role: .destructive, action: stop)
                 } else {
-                    Button("Back up now", action: start).disabled(!canStart)
+                    Button(startTitle, action: start).disabled(!canStart)
                 }
             }
             .buttonStyle(.borderless)

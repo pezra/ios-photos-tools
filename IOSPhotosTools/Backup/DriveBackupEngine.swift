@@ -1,14 +1,16 @@
 import BackgroundTasks
 import Foundation
 import Photos
+import S3Kit
+import SyncKit
 import UIKit
 
 /// Copies the photo library to the folder chosen on a USB drive, using the same layout as the
-/// bucket (`<year>/<month>/<asset-uuid>/<file>`).
+/// bucket (`<year>/<file>`).
 ///
 /// Files are written straight to the drive, so there's no staging or upload queue: a pass is done
 /// when it returns. Files are written under a temporary name and renamed when complete, so a file
-/// that exists on the drive is whole.
+/// that exists on the drive is whole. A pass ends by syncing the phone's low-res copies.
 actor DriveBackupEngine {
     static let shared = DriveBackupEngine()
 
@@ -80,6 +82,15 @@ actor DriveBackupEngine {
         store.setLibraryAssets(libraryIDs)
         setProgress(0, of: pending.count)
 
+        // Names are checked against what's on the drive and in the bucket so nothing is overwritten.
+        if !pending.isEmpty {
+            do {
+                try await prepareInventory(root: root, driveID: driveID)
+            } catch {
+                return await report(phase: "Couldn't check what's in storage", running: false, error: error.localizedDescription)
+            }
+        }
+
         var failed = 0
         var lastError: String?
         var disconnected = false
@@ -87,7 +98,9 @@ actor DriveBackupEngine {
             if Task.isCancelled { break }
             setProgress(index, of: pending.count)
             await report(phase: "Copying \(index + 1) of \(pending.count)", running: true)
-            guard let error = await copy(asset, to: root, driveID: driveID) else { continue }
+            let error = await copy(asset, to: root, driveID: driveID)
+            StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: false)
+            guard let error else { continue }
             if (try? root.checkResourceIsReachable()) != true {
                 disconnected = true
                 break
@@ -96,13 +109,50 @@ actor DriveBackupEngine {
             lastError = error.localizedDescription
         }
         setProgress(pending.count, of: pending.count)
+        if !disconnected {
+            StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: true)
+        }
 
         let phase = disconnected ? "Drive disconnected"
             : Task.isCancelled ? "Paused"
             : failed > 0 ? "Finished with \(failed) items not copied"
             : "Up to date"
         await report(phase: phase, running: false, error: lastError, finished: !Task.isCancelled && !disconnected)
+
+        if !Task.isCancelled && !disconnected {
+            await LibrarySyncEngine.shared.run { phase, done, total in
+                Task { await DriveBackupEngine.shared.showSyncProgress(phase, done: done, total: total) }
+            }
+        }
         continuedTask = nil
+    }
+
+    private func showSyncProgress(_ phase: String, done: Int, total: Int) {
+        continuedTask?.updateTitle(DriveBackgroundTask.syncTitle, subtitle: phase)
+        setProgress(done, of: total)
+    }
+
+    /// Off the actor because walking the drive takes a while, and pausing has to be able to get through.
+    private nonisolated func prepareInventory(root: URL, driveID: String) async throws {
+        try StorageInventory.prepareDrive(root: root, driveID: driveID)
+        // The bucket's last listing will do if it can't be reached now, but there must be one.
+        guard let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3),
+              !StorageInventory.hasListedS3(client: client, prefix: settings.prefix)
+        else { return }
+        let session = settings.bucketSession()
+        defer { session.finishTasksAndInvalidate() }
+        try await StorageInventory.prepareS3(client: client, prefix: settings.prefix, session: session)
+    }
+
+    /// Whether the file at `existing` has the same contents as `resource`.
+    private func isSameFile(_ resource: PHAssetResource, existing: URL) async throws -> Bool {
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: copy) }
+        try await PhotoLibrary.stream(resource, to: copy)
+        // Saves reading the whole file from the drive. A size that can't be read is left for
+        // hashing to report, since it doesn't mean the files differ.
+        if let size = copy.fileSize, let existingSize = existing.fileSize, size != existingSize { return false }
+        return try Staging.sha256(of: copy) == Staging.sha256(of: existing)
     }
 
     /// Copies the asset's files that aren't on the drive yet, plus its edited versions (which keep
@@ -110,11 +160,33 @@ actor DriveBackupEngine {
     private func copy(_ asset: PHAsset, to root: URL, driveID: String) async -> Error? {
         let fm = FileManager.default
         var firstError: Error?
-        for (resource, row) in PhotoLibrary.backupResources(for: asset, prefix: "") {
+        let resources: [(PHAssetResource, ResourceRow)]
+        do {
+            resources = try await BackupPaths.assign(asset, prefix: "")
+        } catch {
+            return error
+        }
+        for (resource, row) in resources {
             if Task.isCancelled { return nil }
-            let destination = root.appending(path: row.s3Key)
+            let destination = root.appending(path: row.path)
             let isEdit = PhotoLibrary.editedTypes.contains(resource.type)
-            if !isEdit && fm.fileExists(atPath: destination.path) { continue }
+            let isOwn = store.isOnDrive(row.path)
+            if fm.fileExists(atPath: destination.path) && isOwn && !isEdit { continue }
+            // Never overwrites: the path may have been chosen while the drive was away. Only an
+            // edit known to be this photo's own gets replaced.
+            if fm.fileExists(atPath: destination.path) && !isOwn {
+                do {
+                    guard try await isSameFile(resource, existing: destination) else {
+                        store.retirePaths(forAsset: asset.localIdentifier)
+                        return BackupPaths.Failure.nameTaken(row.path)
+                    }
+                    store.markOnDrive(row.path)
+                } catch {
+                    if Task.isCancelled { return nil }
+                    firstError = firstError ?? error
+                }
+                continue
+            }
 
             let partial = destination.deletingLastPathComponent().appending(path: ".\(destination.lastPathComponent).partial")
             do {
@@ -124,6 +196,7 @@ actor DriveBackupEngine {
                 guard rename(partial.path, destination.path) == 0 else {
                     throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
+                store.markOnDrive(row.path)
             } catch {
                 try? fm.removeItem(at: partial)
                 // Pausing interrupts the file being copied; that isn't a failure.
@@ -164,6 +237,7 @@ actor DriveBackupEngine {
 /// progress shown by the system.
 enum DriveBackgroundTask {
     static let title = "Backing up to USB drive"
+    static let syncTitle = "Syncing pictures to this phone"
     /// `org.barelyenough.ios-photos-tools.drive.*` is permitted in Info.plist.
     private static let identifierPrefix = "org.barelyenough.ios-photos-tools.drive."
 
@@ -174,7 +248,10 @@ enum DriveBackgroundTask {
         let identifier = identifierPrefix + UUID().uuidString
         BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
             guard let task = task as? BGContinuedProcessingTask else { return task.setTaskCompleted(success: false) }
-            task.expirationHandler = { DriveBackupEngine.stop() }
+            task.expirationHandler = {
+                DriveBackupEngine.stop()
+                LibrarySyncEngine.stop()
+            }
             Task {
                 await DriveBackupEngine.shared.attach(task)
                 await DriveBackupEngine.shared.run()

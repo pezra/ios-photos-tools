@@ -17,10 +17,6 @@ final class CleanupModel {
     /// How far back a recent scan looks when there's no earlier scan to start from.
     private static let defaultLookback: TimeInterval = 30 * 24 * 60 * 60
 
-    /// How many photos are analyzed at once. Vision shares the Neural Engine, so more than a few
-    /// doesn't help.
-    private static let concurrency = 4
-
     private(set) var isScanning = false
     private(set) var phase = "Not scanned yet"
     private(set) var analyzedCount = 0
@@ -133,47 +129,28 @@ final class CleanupModel {
             assets = library.filter { ($0.creationDate ?? .distantPast) >= since }
         }
 
-        let pending = assets.filter { asset in
-            guard let analysis = cached[asset.localIdentifier] else { return true }
-            return analysis.modifiedAt != asset.modificationDate?.timeIntervalSince1970
+        let pending = assets.filter {
+            LibraryAnalyzer.needsAnalysis($0, cached: cached[$0.localIdentifier])
         }
         totalCount = assets.count
         analyzedCount = assets.count - pending.count
 
         var analyses = cached
         var failures = 0
-        await withTaskGroup(of: (String, Result<PhotoAnalysis, Error>).self) { group in
-            var queue = pending.makeIterator()
-            func addNext() -> Bool {
-                guard !Task.isCancelled, let asset = queue.next() else { return false }
-                group.addTask {
-                    do { return (asset.localIdentifier, .success(try await PhotoAnalyzer.analyze(asset))) }
-                    catch { return (asset.localIdentifier, .failure(error)) }
-                }
-                return true
+        await LibraryAnalyzer.analyze(pending) { id, result in
+            switch result {
+            case .success(let analysis):
+                analyses[id] = analysis
+            case .failure(let error):
+                failures += 1
+                lastError = error.localizedDescription
             }
-            for _ in 0..<Self.concurrency { _ = addNext() }
-
-            while let (id, result) = await group.next() {
-                switch result {
-                case .success(let analysis):
-                    AnalysisStore.shared.save(analysis)
-                    analyses[id] = analysis
-                case .failure(let error):
-                    failures += 1
-                    lastError = error.localizedDescription
-                }
-                analyzedCount += 1
-                phase = "Analyzing \(analyzedCount) of \(totalCount)"
-                _ = addNext()
-            }
+            analyzedCount += 1
+            phase = "Analyzing \(analyzedCount) of \(totalCount)"
         }
 
         candidates = assets.compactMap { asset in
-            analyses[asset.localIdentifier].map {
-                Candidate(analysis: $0, createdAt: asset.creationDate, isFavorite: asset.isFavorite,
-                          isEdited: asset.hasAdjustments, burstID: asset.burstIdentifier)
-            }
+            analyses[asset.localIdentifier].map { Candidate(analysis: $0, asset: asset) }
         }
         regroup()
 
@@ -197,13 +174,14 @@ final class CleanupModel {
         marked = Set(groups.flatMap { $0.assetIDs.dropFirst() }).subtracting(kept)
     }
 
-    /// Visible still photos, including every shot of each burst. Hidden photos are left alone.
+    /// Visible still photos, including every shot of each burst. Hidden photos are left alone, and
+    /// so are low-res copies synced from storage, which has already been cleaned up.
     private static func fetchPhotos() -> [PHAsset] {
         let options = PHFetchOptions()
         options.includeAllBurstAssets = true
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         var assets: [PHAsset] = []
-        PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in assets.append(asset) }
+        PhotoLibrary.enumerateOwnAssets(PHAsset.fetchAssets(with: options)) { assets.append($0) }
         return assets
     }
 }

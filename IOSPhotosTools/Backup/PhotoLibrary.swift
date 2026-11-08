@@ -1,4 +1,5 @@
 import Photos
+import SyncKit
 import UniformTypeIdentifiers
 
 enum PhotoLibrary {
@@ -28,15 +29,30 @@ enum PhotoLibrary {
         return PHAsset.fetchAssets(with: options)
     }
 
+    /// Calls `body` with each of `assets` except the low-res copies imported from storage.
+    static func enumerateOwnAssets(_ assets: PHFetchResult<PHAsset>, _ body: @escaping (PHAsset) -> Void) {
+        let imported = BackupStore.shared.importedAssetIDs()
+        assets.enumerateObjects { asset, _, _ in
+            if !imported.contains(asset.localIdentifier) { body(asset) }
+        }
+    }
+
+    /// Full access, which syncing to the phone needs: with limited access imported photos can't
+    /// all be seen, so they'd be imported again.
+    static var hasFullAccess: Bool {
+        PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized
+    }
+
     /// Assets that need backing up, given `completed` (asset ID → the asset's modification date
-    /// when it was backed up), and the IDs of every asset in the library.
+    /// when it was backed up), and the IDs of every asset in the library that gets backed up.
+    /// Low-res copies imported from storage are left out of both.
     ///
     /// New assets are included, plus completed ones modified since (e.g. edited) so new edits are
     /// backed up, and ones whose date is unknown.
     static func pendingAssets(completed: [String: Double?]) -> (pending: [PHAsset], allIDs: [String]) {
         var pending: [PHAsset] = []
         var ids: [String] = []
-        fetchAllAssets().enumerateObjects { asset, _, _ in
+        enumerateOwnAssets(fetchAllAssets()) { asset in
             ids.append(asset.localIdentifier)
             guard let backedUpAt = completed[asset.localIdentifier] else { return pending.append(asset) }
             if let backedUpAt, let modified = asset.modificationDate?.timeIntervalSince1970, modified <= backedUpAt { return }
@@ -45,33 +61,23 @@ enum PhotoLibrary {
         return (pending, ids)
     }
 
-    /// The resources of `asset` to back up, paired with their stable ID and object key.
-    static func backupResources(for asset: PHAsset, prefix: String) -> [(PHAssetResource, ResourceRow)] {
-        // localIdentifier looks like "UUID/L0/001"; the UUID alone is unique and path-safe.
-        let assetUUID = asset.localIdentifier.split(separator: "/").first.map(String.init) ?? asset.localIdentifier
-        let folder: String
-        if let date = asset.creationDate {
-            let parts = Calendar(identifier: .gregorian).dateComponents([.year, .month], from: date)
-            folder = String(format: "%04d/%02d", parts.year ?? 0, parts.month ?? 0)
-        } else {
-            folder = "undated"
-        }
+    /// The tag on a photo imported from storage, if these are the files of one.
+    static func importTag(in resources: [PHAssetResource]) -> String? {
+        resources.lazy.compactMap { LibraryPath.tag(inFilename: $0.originalFilename) }.first
+    }
 
-        var usedNames = Set<String>()
-        return PHAssetResource.assetResources(for: asset)
-            .filter { backedUpTypes.contains($0.type) }
-            .map { resource in
-                var name = resource.originalFilename.replacingOccurrences(of: "/", with: "_")
-                if name.isEmpty { name = "resource" }
-                if usedNames.contains(name) { name = "\(resource.type.rawValue)-\(name)" }
-                usedNames.insert(name)
+    /// The files of `asset` to back up. A photo imported from storage has none: this goes by the
+    /// tag on the photo itself, so a low-res copy can't overwrite or join the backup even if the
+    /// database has lost track of it.
+    static func backupCandidates(for asset: PHAsset) -> [PHAssetResource] {
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard importTag(in: resources) == nil else { return [] }
+        return resources.filter { backedUpTypes.contains($0.type) }
+    }
 
-                let key = [prefix, folder, assetUUID, name].filter { !$0.isEmpty }.joined(separator: "/")
-                let row = ResourceRow(id: "\(asset.localIdentifier)#\(resource.type.rawValue)#\(name)",
-                                      assetID: asset.localIdentifier,
-                                      s3Key: key)
-                return (resource, row)
-            }
+    /// The year folder an asset's files go in.
+    static func backupFolder(for asset: PHAsset) -> String {
+        BackupNaming.folder(year: asset.creationDate.map { Calendar(identifier: .gregorian).component(.year, from: $0) })
     }
 
     static func contentType(of resource: PHAssetResource) -> String {

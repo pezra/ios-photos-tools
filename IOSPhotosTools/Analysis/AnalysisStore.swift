@@ -39,26 +39,43 @@ final class AnalysisStore: @unchecked Sendable {
                 id TEXT PRIMARY KEY
             );
             """, nil, nil, nil)
+        // Columns added after the first release. Each fails harmlessly once it exists. Rows from
+        // before have version 1, so tools that need the new columns re-analyze them.
+        for column in [
+            "face_count INTEGER NOT NULL DEFAULT 0",
+            "face_area REAL NOT NULL DEFAULT 0",
+            "person_area REAL NOT NULL DEFAULT 0",
+            "version INTEGER NOT NULL DEFAULT 1",
+        ] {
+            sqlite3_exec(db, "ALTER TABLE analyses ADD COLUMN \(column)", nil, nil, nil)
+        }
     }
+
+    private static let columns = """
+        id, modified_at, width, height, dhash, feature_print, aesthetics, is_utility, face_quality, sharpness,
+        face_count, face_area, person_area, version
+        """
 
     func all() -> [String: PhotoAnalysis] {
         locked {
-            let rows = query("""
-                SELECT id, modified_at, width, height, dhash, feature_print, aesthetics, is_utility, face_quality, sharpness
-                FROM analyses
-                """) { stmt in
-                PhotoAnalysis(assetID: text(stmt, 0) ?? "",
-                              modifiedAt: double(stmt, 1),
-                              pixelWidth: Int(sqlite3_column_int64(stmt, 2)),
-                              pixelHeight: Int(sqlite3_column_int64(stmt, 3)),
-                              dHash: UInt64(bitPattern: sqlite3_column_int64(stmt, 4)),
-                              featurePrint: floats(stmt, 5),
-                              aesthetics: Float(sqlite3_column_double(stmt, 6)),
-                              isUtility: sqlite3_column_int(stmt, 7) != 0,
-                              faceQuality: double(stmt, 8).map { Float($0) },
-                              sharpness: sqlite3_column_double(stmt, 9))
-            }
+            let rows = query("SELECT \(Self.columns) FROM analyses", [], analysis)
             return Dictionary(rows.map { ($0.assetID, $0) }, uniquingKeysWith: { $1 })
+        }
+    }
+
+    /// Cached analyses of just these photos.
+    func analyses(_ ids: [String]) -> [String: PhotoAnalysis] {
+        locked {
+            var result: [String: PhotoAnalysis] = [:]
+            // In groups, since SQLite limits how many values one statement can take.
+            for start in stride(from: 0, to: ids.count, by: 500) {
+                let group = Array(ids[start..<min(start + 500, ids.count)])
+                let marks = Array(repeating: "?", count: group.count).joined(separator: ", ")
+                for row in query("SELECT \(Self.columns) FROM analyses WHERE id IN (\(marks))", group, analysis) {
+                    result[row.assetID] = row
+                }
+            }
+            return result
         }
     }
 
@@ -66,12 +83,12 @@ final class AnalysisStore: @unchecked Sendable {
         let featurePrint = analysis.featurePrint.withUnsafeBufferPointer { Data(buffer: $0) }
         locked {
             execute("""
-                INSERT OR REPLACE INTO analyses
-                (id, modified_at, width, height, dhash, feature_print, aesthetics, is_utility, face_quality, sharpness)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO analyses (\(Self.columns))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [analysis.assetID, analysis.modifiedAt, analysis.pixelWidth, analysis.pixelHeight,
                       Int(Int64(bitPattern: analysis.dHash)), featurePrint, Double(analysis.aesthetics),
-                      analysis.isUtility ? 1 : 0, analysis.faceQuality.map { Double($0) }, analysis.sharpness])
+                      analysis.isUtility ? 1 : 0, analysis.faceQuality.map { Double($0) }, analysis.sharpness,
+                      analysis.faceCount, Double(analysis.faceArea), Double(analysis.personArea), analysis.version])
         }
     }
 
@@ -103,6 +120,23 @@ final class AnalysisStore: @unchecked Sendable {
     }
 
     // MARK: - SQLite helpers (call with lock held)
+
+    private func analysis(_ stmt: OpaquePointer) -> PhotoAnalysis {
+        PhotoAnalysis(assetID: text(stmt, 0) ?? "",
+                      modifiedAt: double(stmt, 1),
+                      pixelWidth: Int(sqlite3_column_int64(stmt, 2)),
+                      pixelHeight: Int(sqlite3_column_int64(stmt, 3)),
+                      dHash: UInt64(bitPattern: sqlite3_column_int64(stmt, 4)),
+                      featurePrint: floats(stmt, 5),
+                      aesthetics: Float(sqlite3_column_double(stmt, 6)),
+                      isUtility: sqlite3_column_int(stmt, 7) != 0,
+                      faceQuality: double(stmt, 8).map { Float($0) },
+                      faceCount: Int(sqlite3_column_int64(stmt, 10)),
+                      faceArea: Float(sqlite3_column_double(stmt, 11)),
+                      personArea: Float(sqlite3_column_double(stmt, 12)),
+                      sharpness: sqlite3_column_double(stmt, 9),
+                      version: Int(sqlite3_column_int64(stmt, 13)))
+    }
 
     private func locked<T>(_ body: () -> T) -> T {
         lock.lock()

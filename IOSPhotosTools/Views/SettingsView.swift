@@ -1,5 +1,6 @@
 import S3Kit
 import SwiftUI
+import SyncKit
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
@@ -10,6 +11,11 @@ struct SettingsView: View {
     @State private var confirmingReset = false
     @State private var choosingDriveFolder = false
     @State private var driveError: String?
+    @State private var isCheckingSync = false
+    @State private var confirmingSync = false
+    @State private var pendingSync = 0
+    @State private var syncError: String?
+    @State private var lacksConditionalWrites = false
 
     var body: some View {
         @Bindable var settings = settings
@@ -66,6 +72,11 @@ struct SettingsView: View {
                     case nil:
                         EmptyView()
                     }
+                    if lacksConditionalWrites {
+                        Label("This service can't refuse an upload to a name that's taken, so only checking its list first keeps a different picture from being overwritten. Turn on bucket versioning.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
                 } footer: {
                     Text("Uploads a small test file to the folder above.")
                 }
@@ -90,15 +101,47 @@ struct SettingsView: View {
                 } header: {
                     Text("USB drive")
                 } footer: {
-                    Text("Plug in the drive, then pick a folder on it. Photos are copied there whenever the drive is plugged in while Photos Tools is open, and keep copying if you leave the app.")
+                    Text("Plug in the drive, then pick your pictures folder on it. Photos are copied into its year folders whenever the drive is plugged in while Photos Tools is open, and keep copying if you leave the app.")
+                }
+
+                Section {
+                    if settings.syncEnabled {
+                        Toggle("Sync pictures to this phone", isOn: $settings.syncEnabled)
+                    } else {
+                        Button {
+                            Task { await checkSync() }
+                        } label: {
+                            HStack {
+                                Text("Set up sync…")
+                                if isCheckingSync { Spacer(); ProgressView() }
+                            }
+                        }
+                        .disabled(isCheckingSync)
+                    }
+                    if let syncError {
+                        Label(syncError, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("Sync to phone")
+                } footer: {
+                    Text("Keeps a smaller copy of every picture on the drive and in the bucket in your Photos library, in the \(LibrarySyncEngine.albumTitle) album. Originals stay in storage. Needs full photo access.")
+                }
+
+                Section {
+                    Toggle("Make trip albums automatically", isOn: $settings.tripAlbums)
+                } header: {
+                    Text("Trip albums")
+                } footer: {
+                    Text("When you get back from a trip, an album of the best photos from each place you visited is added to the Trips folder in Photos.")
                 }
 
                 Section {
                     Button("Forget backup history", role: .destructive) { confirmingReset = true }
                 } footer: {
-                    Text("Makes the next backup upload everything again. Use this after switching to a different bucket.")
+                    Text("Makes the next backup check every photo again and upload whatever isn't in the bucket. Use this after switching to a different bucket.")
                 }
             }
+            .task { refreshConditionalWrites() }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -112,7 +155,12 @@ struct SettingsView: View {
                     driveError = error.localizedDescription
                 }
             }
-            .confirmationDialog("Upload your whole library again?", isPresented: $confirmingReset, titleVisibility: .visible) {
+            .confirmationDialog("Sync \(pendingSync) pictures to this phone?", isPresented: $confirmingSync, titleVisibility: .visible) {
+                Button("Start sync") { startSync() }
+            } message: {
+                Text(syncConfirmation)
+            }
+            .confirmationDialog("Check your whole library again?", isPresented: $confirmingReset, titleVisibility: .visible) {
                 Button("Forget backup history", role: .destructive) {
                     BackupStore.shared.reset()
                     BackupStatus.shared.refreshCounts()
@@ -127,12 +175,66 @@ struct SettingsView: View {
         guard let snapshot = SettingsStore.snapshot() else { return }
         do {
             let client = try S3Client(config: snapshot.s3)
-            let key = [snapshot.prefix, ".backup-test"].filter { !$0.isEmpty }.joined(separator: "/")
+            let key = LibraryPath.key(prefix: snapshot.prefix, path: ".backup-test")
             try await client.putObject(key: key, data: Data("Photos Tools connection test\n".utf8), contentType: "text/plain")
-            testResult = .success("Wrote \(key)")
+            _ = try await client.listObjects(prefix: key)
+            _ = try await client.getObject(key: key)
+            _ = try? await StorageInventory.checkConditionalWrites(client: client, prefix: snapshot.prefix, session: .shared)
+            refreshConditionalWrites()
+            testResult = .success("Wrote, listed and read \(key)")
+        } catch let error as S3Error where error.status == 403 {
+            testResult = .failure(ConnectionError.needsReadAccess(error))
         } catch {
             testResult = .failure(error)
         }
+    }
+
+    private func refreshConditionalWrites() {
+        guard let snapshot = SettingsStore.snapshot(), let client = try? S3Client(config: snapshot.s3) else {
+            lacksConditionalWrites = false
+            return
+        }
+        lacksConditionalWrites = StorageInventory.lacksConditionalWrites(client: client, prefix: snapshot.prefix)
+    }
+
+    private enum ConnectionError: Error, LocalizedError {
+        case needsReadAccess(S3Error)
+
+        var errorDescription: String? {
+            switch self {
+            case let .needsReadAccess(error): "These keys need s3:PutObject, s3:GetObject and s3:ListBucket. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func checkSync() async {
+        isCheckingSync = true
+        syncError = nil
+        defer { isCheckingSync = false }
+        guard PhotoLibrary.hasFullAccess else {
+            syncError = "Allow full photo access in the Settings app first."
+            return
+        }
+        do {
+            pendingSync = try await LibrarySyncEngine.shared.countPending()
+            confirmingSync = true
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    private var syncConfirmation: String {
+        let size = Int64(pendingSync) * LibrarySyncEngine.estimatedBytesPerPicture
+        let estimate = size.formatted(.byteCount(style: .file))
+        let drive = DriveDestination.isConnected
+            ? ""
+            : " The drive isn't connected, so pictures would be downloaded from the bucket, which your provider may charge for. Plug it in first to avoid that."
+        return "This adds about \(estimate) to your Photos library. If iCloud Photos is on, the copies also upload to iCloud and count against your storage.\(drive)"
+    }
+
+    private func startSync() {
+        settings.syncEnabled = true
+        LibrarySyncEngine.startFromUI()
     }
 }
 

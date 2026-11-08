@@ -3,8 +3,15 @@ import UIKit
 import Vision
 
 /// Runs on-device models over a photo: Vision's feature print (for similarity), aesthetics
-/// score and face capture quality (for picking the best shot), plus a hash and sharpness.
+/// score, faces and people (for picking the best shot), plus a hash and sharpness.
 enum PhotoAnalyzer {
+    /// Bump when the analysis gains measurements, so photos analyzed before can be redone by the
+    /// tools that need them.
+    ///
+    /// 1. Feature print, aesthetics, face quality, hash and sharpness.
+    /// 2. Face count, face area and person area.
+    static let version = 2
+
     /// Vision scales images down to a few hundred pixels anyway, so a small thumbnail is enough
     /// and much faster to load than the original.
     static let thumbnailSize = CGSize(width: 512, height: 512)
@@ -17,10 +24,11 @@ enum PhotoAnalyzer {
     static func analyze(_ asset: PHAsset) async throws -> PhotoAnalysis {
         let (image, orientation) = try await thumbnail(of: asset)
 
-        let (featurePrint, aesthetics, faces) = try await ImageRequestHandler(image, orientation: orientation).perform(
+        let (featurePrint, aesthetics, faces, people) = try await ImageRequestHandler(image, orientation: orientation).perform(
             GenerateImageFeaturePrintRequest(),
             CalculateImageAestheticsScoresRequest(),
-            DetectFaceCaptureQualityRequest()
+            DetectFaceCaptureQualityRequest(),
+            DetectHumanRectanglesRequest()
         )
         guard let dHash = ImageMetrics.dHash(image), let sharpness = ImageMetrics.sharpness(image) else {
             throw AnalysisError.noImage
@@ -35,7 +43,15 @@ enum PhotoAnalyzer {
                              aesthetics: aesthetics.overallScore,
                              isUtility: aesthetics.isUtility,
                              faceQuality: faces.compactMap { $0.captureQuality?.score }.min(),
-                             sharpness: sharpness)
+                             faceCount: faces.count,
+                             faceArea: largestArea(faces.map(\.boundingBox)),
+                             personArea: largestArea(people.map(\.boundingBox)),
+                             sharpness: sharpness,
+                             version: version)
+    }
+
+    private static func largestArea(_ boxes: [NormalizedRect]) -> Float {
+        Float(boxes.map { $0.width * $0.height }.max() ?? 0)
     }
 
     private static func floats(_ observation: FeaturePrintObservation) throws -> [Float] {
