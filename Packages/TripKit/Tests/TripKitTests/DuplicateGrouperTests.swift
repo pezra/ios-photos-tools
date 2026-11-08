@@ -144,6 +144,26 @@ final class DuplicateGrouperTests: XCTestCase {
         XCTAssertEqual(groups[0].best, "b")
     }
 
+    func testEachDistanceIsComputedOnce() {
+        var photos = (0..<40).map { i in
+            photo("q\(i)", at: Double(i) * 15, look: i / 10, tilt: Float(i % 4) * 0.05)
+        }
+        // Copies of each other far apart in time, so the merge step compares them too.
+        photos += [photo("c1", at: 90_000, look: 2, hash: 5), photo("c2", at: 95_000, look: 2, hash: 5),
+                   photo("c3", at: 99_000, look: 2, hash: 5)]
+        // Two clusters that don't resemble each other, which a later photo resembles both of.
+        photos += [photo("x1", at: 200_000, look: 6), photo("x2", at: 200_005, look: 6, tilt: 0.8),
+                   photo("x3", at: 200_010, look: 6, tilt: 0.4)]
+        var seen: [Set<String>: Int] = [:]
+        let counted = DuplicateGrouper.groups(photos) { a, b in
+            seen[[a.id, b.id], default: 0] += 1
+            return FeaturePrint.distance(a.featurePrint, b.featurePrint)
+        }
+        XCTAssertFalse(seen.isEmpty)
+        XCTAssertEqual(seen.values.max(), 1)
+        XCTAssertEqual(ids(counted), ids(DuplicateGrouper.groups(photos)))
+    }
+
     /// A fixed mixed set, pinned so refactors of the grouper can't change what it finds.
     func testPinnedLargeFixture() {
         var photos: [DuplicateCandidate] = []

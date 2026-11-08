@@ -59,10 +59,16 @@ public enum DuplicateGrouper {
         public init() {}
     }
 
+    /// Distance between two photos' feature prints.
+    public typealias Distance = (DuplicateCandidate, DuplicateCandidate) -> Float
+
     /// Groups of two or more near-identical photos, newest first, each ranked best first.
-    public static func groups(_ candidates: [DuplicateCandidate], options: Options = Options()) -> [DuplicateGroup] {
-        var clusters = timeClusters(candidates, options: options)
-        clusters = mergingCopies(clusters, options: options)
+    /// `distance` is called at most once for a pair of photos.
+    public static func groups(_ candidates: [DuplicateCandidate], options: Options = Options(),
+                              distance: @escaping Distance = { FeaturePrint.distance($0.featurePrint, $1.featurePrint) }) -> [DuplicateGroup] {
+        let distances = DistanceCache(distance)
+        var clusters = timeClusters(candidates, options: options, distances)
+        clusters = mergingCopies(clusters, options: options, distances)
         return clusters
             .filter { $0.count > 1 }
             .map { (newest: $0.compactMap(\.createdAt).max() ?? .distantPast, cluster: $0) }
@@ -91,9 +97,30 @@ public enum DuplicateGrouper {
     }
 
     public static func areSimilar(_ a: DuplicateCandidate, _ b: DuplicateCandidate, options: Options) -> Bool {
+        looksTheSame(a, b, options: options) || FeaturePrint.distance(a.featurePrint, b.featurePrint) <= options.maxFeatureDistance
+    }
+
+    /// Same burst or nearly the same hash, which settles it without comparing feature prints.
+    private static func looksTheSame(_ a: DuplicateCandidate, _ b: DuplicateCandidate, options: Options) -> Bool {
         if let burst = a.burstID, burst == b.burstID { return true }
-        if (a.dHash ^ b.dHash).nonzeroBitCount <= options.maxHashDistance { return true }
-        return FeaturePrint.distance(a.featurePrint, b.featurePrint) <= options.maxFeatureDistance
+        return (a.dHash ^ b.dHash).nonzeroBitCount <= options.maxHashDistance
+    }
+
+    /// Remembers each distance, since the clustering and the copy merge can ask for the same pair.
+    private final class DistanceCache {
+        private struct Pair: Hashable { let a: String; let b: String }
+        private let compute: Distance
+        private var known: [Pair: Float] = [:]
+
+        init(_ compute: @escaping Distance) { self.compute = compute }
+
+        func between(_ a: DuplicateCandidate, _ b: DuplicateCandidate) -> Float {
+            let pair = a.id < b.id ? Pair(a: a.id, b: b.id) : Pair(a: b.id, b: a.id)
+            if let known = known[pair] { return known }
+            let value = compute(a, b)
+            known[pair] = value
+            return value
+        }
     }
 
     // MARK: - Steps
@@ -101,7 +128,8 @@ public enum DuplicateGrouper {
     /// Walks the photos in capture order, adding each to the nearby cluster it's most similar to.
     /// A photo joins only if it resembles every member already there, so a slow pan doesn't chain
     /// into one huge group.
-    private static func timeClusters(_ candidates: [DuplicateCandidate], options: Options) -> [[DuplicateCandidate]] {
+    private static func timeClusters(_ candidates: [DuplicateCandidate], options: Options,
+                                     _ distances: DistanceCache) -> [[DuplicateCandidate]] {
         let dated = candidates.filter { $0.createdAt != nil }.sorted { $0.createdAt! < $1.createdAt! }
         var clusters = candidates.filter { $0.createdAt == nil }.map { [$0] }
 
@@ -113,10 +141,13 @@ public enum DuplicateGrouper {
             clusters += stale
             open = live
 
-            let best = open.indices
-                .filter { i in open[i].allSatisfy { areSimilar($0, candidate, options: options) } }
-                .min { worstDistance(open[$0], candidate) < worstDistance(open[$1], candidate) }
-            if let best {
+            // The cluster it resembles, with the largest distance to any member, least first.
+            var best: (index: Int, worst: Float)?
+            for i in open.indices {
+                guard let worst = worstDistance(open[i], candidate, options: options, distances) else { continue }
+                if best == nil || worst < best!.worst { best = (i, worst) }
+            }
+            if let best = best?.index {
                 open[best].append(candidate)
             } else {
                 open.append([candidate])
@@ -127,7 +158,8 @@ public enum DuplicateGrouper {
 
     /// Joins clusters holding byte-for-byte-looking copies (same hash and size), however far
     /// apart they were taken, e.g. a photo imported twice or saved from a message.
-    private static func mergingCopies(_ clusters: [[DuplicateCandidate]], options: Options) -> [[DuplicateCandidate]] {
+    private static func mergingCopies(_ clusters: [[DuplicateCandidate]], options: Options,
+                                      _ distances: DistanceCache) -> [[DuplicateCandidate]] {
         var parent = Array(clusters.indices)
         func root(_ i: Int) -> Int {
             var i = i
@@ -145,19 +177,42 @@ public enum DuplicateGrouper {
                     continue
                 }
                 // Featureless images (all black, all sky) can share a hash; make sure they match.
-                if FeaturePrint.distance(first.candidate.featurePrint, candidate.featurePrint) <= options.maxFeatureDistance / 3 {
+                guard root(index) != root(first.cluster) else { continue }
+                if distances.between(first.candidate, candidate) <= options.maxFeatureDistance / 3 {
                     parent[root(index)] = root(first.cluster)
                 }
             }
         }
 
         var merged: [Int: [DuplicateCandidate]] = [:]
-        for (index, cluster) in clusters.enumerated() { merged[root(index), default: []] += cluster }
-        return Array(merged.values)
+        var order: [Int] = []
+        for (index, cluster) in clusters.enumerated() {
+            let r = root(index)
+            if merged[r] == nil { order.append(r) }
+            merged[r, default: []] += cluster
+        }
+        return order.map { merged[$0]! }
     }
 
-    private static func worstDistance(_ cluster: [DuplicateCandidate], _ candidate: DuplicateCandidate) -> Float {
-        cluster.map { FeaturePrint.distance($0.featurePrint, candidate.featurePrint) }.max() ?? 0
+    /// The largest feature-print distance from the photo to any member of the cluster, or nil if
+    /// it doesn't resemble every member.
+    private static func worstDistance(_ cluster: [DuplicateCandidate], _ candidate: DuplicateCandidate,
+                                      options: Options, _ distances: DistanceCache) -> Float? {
+        var worst: Float = 0
+        // Members that match by burst or hash still count toward the largest distance, but only
+        // once the others have shown the cluster is a fit.
+        var matched: [DuplicateCandidate] = []
+        for member in cluster {
+            if looksTheSame(member, candidate, options: options) {
+                matched.append(member)
+                continue
+            }
+            let d = distances.between(member, candidate)
+            guard d <= options.maxFeatureDistance else { return nil }
+            worst = max(worst, d)
+        }
+        for member in matched { worst = max(worst, distances.between(member, candidate)) }
+        return worst
     }
 }
 
