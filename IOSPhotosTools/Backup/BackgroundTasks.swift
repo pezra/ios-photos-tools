@@ -32,14 +32,17 @@ enum BackgroundTasks {
         request.requiresNetworkConnectivity = needsNetwork
         do {
             try BGTaskScheduler.shared.submit(request)
+            Log.background.info("Scheduled \(label, privacy: .public)")
         } catch {
-            print("Couldn't schedule \(label): \(error)")
+            Log.background.error("Couldn't schedule \(label, privacy: .public): \(error, privacy: .public)")
         }
     }
 
     private static func handle(_ task: BGProcessingTask) {
+        Log.background.info("Background backup started")
         schedule()
         task.expirationHandler = {
+            Log.background.info("Background backup expired")
             BackupEngine.stop()
             DriveBackupEngine.stop()
             LibrarySyncEngine.stop()
@@ -51,6 +54,7 @@ enum BackgroundTasks {
             await drive
             await LibrarySyncEngine.shared.run()
             task.setTaskCompleted(success: true)
+            Log.background.info("Background backup completed")
         }
     }
 

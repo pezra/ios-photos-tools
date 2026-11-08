@@ -27,6 +27,9 @@ enum Staging {
     }
 
     static func sha256(of file: URL) throws -> String {
+        Log.hash.info("Hashing \(file.lastPathComponent, privacy: .public)")
+        let signpost = Log.signposter.beginInterval("hash", id: Log.signposter.makeSignpostID())
+        defer { Log.signposter.endInterval("hash", signpost) }
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         var hasher = SHA256()

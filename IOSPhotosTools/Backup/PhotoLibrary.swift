@@ -86,6 +86,9 @@ enum PhotoLibrary {
 
     /// Writes the original bytes of `resource` to `url`, downloading from iCloud if necessary.
     static func export(_ resource: PHAssetResource, to url: URL) async throws {
+        Log.export.info("Exporting \(resource.originalFilename, privacy: .public)")
+        let signpost = Log.signposter.beginInterval("export", id: Log.signposter.makeSignpostID())
+        defer { Log.signposter.endInterval("export", signpost) }
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -102,6 +105,9 @@ enum PhotoLibrary {
     /// Like `export`, but writes the bytes from this process, so files on a security-scoped
     /// location such as a USB drive don't depend on the Photos service being able to reach it.
     static func stream(_ resource: PHAssetResource, to url: URL) async throws {
+        Log.export.info("Streaming \(resource.originalFilename, privacy: .public)")
+        let signpost = Log.signposter.beginInterval("export", id: Log.signposter.makeSignpostID())
+        defer { Log.signposter.endInterval("export", signpost) }
         guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
         }

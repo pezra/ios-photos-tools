@@ -393,6 +393,7 @@ actor LibrarySyncEngine {
     // MARK: - Status
 
     private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false, done: Int? = nil, total: Int? = nil) async {
+        Log.pass.log(phase: phase, of: "sync", running: running, startingPass: startingPass)
         if let done, let total { progressHandler?(phase, done, total) }
         await MainActor.run {
             let status = SyncStatus.shared

@@ -267,6 +267,7 @@ actor DriveBackupEngine {
     /// `startingPass` clears the previous pass's error, which otherwise lingers when that pass
     /// was paused or the drive was unplugged.
     private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false) async {
+        Log.pass.log(phase: phase, of: "drive", running: running, startingPass: startingPass)
         continuedTask?.updateTitle(DriveBackgroundTask.title, subtitle: phase)
         await MainActor.run {
             let status = DriveStatus.shared
@@ -300,7 +301,9 @@ enum DriveBackgroundTask {
         let identifier = identifierPrefix + UUID().uuidString
         BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
             guard let task = task as? BGContinuedProcessingTask else { return task.setTaskCompleted(success: false) }
+            Log.continuedTask.info("Continued task started")
             task.expirationHandler = {
+                Log.continuedTask.info("Continued task expired or stopped")
                 DriveBackupEngine.stop()
                 LibrarySyncEngine.stop()
             }
@@ -310,14 +313,16 @@ enum DriveBackgroundTask {
                 // stopping it, and failure would show a "failed" notification for a stop they chose.
                 // A pass cut short carries on next time anyway.
                 task.setTaskCompleted(success: true)
+                Log.continuedTask.info("Continued task completed")
             }
         }
         let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: title, subtitle: "Starting…")
         request.strategy = .fail
         do {
             try BGTaskScheduler.shared.submit(request)
+            Log.continuedTask.info("Continued task requested")
         } catch {
-            print("Couldn't continue drive backup in the background: \(error)")
+            Log.continuedTask.error("Couldn't continue drive backup in the background: \(error, privacy: .public)")
         }
     }
 }

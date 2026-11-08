@@ -35,11 +35,13 @@ public struct DriveListing {
     }
 
     /// Lists the drive, unless a listing finished within `freshFor` seconds. `progress` is told how
-    /// many files have been found, counting those found by passes that were cut short.
-    public func run(freshFor: TimeInterval, progress: ((Int) async -> Void)? = nil) async throws {
+    /// many files have been found, counting those found by passes that were cut short. Returns how
+    /// many files the finished listing found, or nil if a recent one was used instead.
+    @discardableResult
+    public func run(freshFor: TimeInterval, progress: ((Int) async -> Void)? = nil) async throws -> Int? {
         let finishedKey = "\(key)-finished"
         let now = Date().timeIntervalSince1970
-        if let finished = store.meta(finishedKey).flatMap(Double.init), now - finished < freshFor { return }
+        if let finished = store.meta(finishedKey).flatMap(Double.init), now - finished < freshFor { return nil }
 
         let fm = FileManager.default
         var state = store.meta(key).flatMap { try? JSONDecoder().decode(State.self, from: Data($0.utf8)) } ?? State()
@@ -112,6 +114,7 @@ public struct DriveListing {
         guard store.keepInventory(source: .drive, onlyInFolders: Set(state.folders)) else { throw BackupStore.Failure.couldNotSave }
         store.setMeta(key, "")
         store.setMeta(finishedKey, String(Date().timeIntervalSince1970))
+        return state.found
     }
 
     private func checkReachable() throws {

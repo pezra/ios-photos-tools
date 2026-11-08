@@ -250,6 +250,7 @@ actor BackupEngine {
     /// `startingPass` clears the previous pass's error, which otherwise lingers when that pass
     /// was paused.
     private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false) async {
+        Log.pass.log(phase: phase, of: "bucket", running: running, startingPass: startingPass)
         await MainActor.run {
             let status = BackupStatus.shared
             status.phase = phase

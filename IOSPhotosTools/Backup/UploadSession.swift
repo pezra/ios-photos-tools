@@ -42,6 +42,7 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
         let task = session.uploadTask(with: request, fromFile: file)
         task.taskDescription = resourceID
         task.resume()
+        Log.upload.info("Upload queued: \(resourceID, privacy: .public), conditional: \(mustNotExist)")
     }
 
     // MARK: - URLSessionDataDelegate
@@ -63,6 +64,7 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
         let stagedName = store.stagedName(forResource: resourceID)
         let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
 
+        Log.upload.info("Upload ended: \(resourceID, privacy: .public), status \(status), error: \(error != nil)")
         if store.resetIfSuperseded(resourceID) {
             // Sent to a path its photo no longer has, so a Live Photo's files would end up under
             // different names. It goes to the new path on the next pass.
@@ -84,6 +86,7 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        Log.upload.info("Background upload events delivered")
         DispatchQueue.main.async {
             let handler = self.backgroundCompletionHandler
             self.backgroundCompletionHandler = nil

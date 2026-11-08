@@ -23,8 +23,15 @@ enum StorageInventory {
     /// have been found so far.
     static func prepareDrive(root: URL, driveID: String, progress: ((Int) async -> Void)? = nil) async throws {
         try mergeHandledPaths(fromDrive: root, driveID: driveID)
-        try await DriveListing(store: store, root: root, key: "drive-listing-\(driveID)")
-            .run(freshFor: driveListingFreshFor, progress: progress)
+        let found = try await Log.interval("drive listing") {
+            try await DriveListing(store: store, root: root, key: "drive-listing-\(driveID)")
+                .run(freshFor: driveListingFreshFor, progress: progress)
+        }
+        if let found {
+            Log.listing.info("Drive listed: \(found) files")
+        } else {
+            Log.listing.info("Drive listing reused: finished within \(Int(driveListingFreshFor)) s")
+        }
     }
 
     private static func mergeHandledPaths(fromDrive root: URL, driveID: String) throws {
@@ -51,9 +58,10 @@ enum StorageInventory {
             try HandledPathsFile.encode(store.handledEntries()).write(to: partial)
             guard rename(partial.path, file.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             store.setMeta(key, String(version))
+            Log.handledPaths.info("Wrote handled paths to the drive at version \(version)")
         } catch {
             try? FileManager.default.removeItem(at: partial)
-            print("Couldn't write handled paths to the drive: \(error)")
+            Log.handledPaths.error("Couldn't write handled paths to the drive: \(error)")
         }
     }
 
@@ -83,7 +91,13 @@ enum StorageInventory {
             store.setMeta("current-bucket", current)
         }
         try await mergeHandledPaths(fromS3: client, prefix: prefix, session: session)
-        if !isFresh { try await refreshS3(client: client, prefix: prefix, session: session, progress: progress) }
+        if isFresh {
+            Log.listing.info("Bucket listing reused: listed within \(Int(s3ListingFreshFor)) s")
+        } else {
+            try await Log.interval("bucket listing") {
+                try await refreshS3(client: client, prefix: prefix, session: session, progress: progress)
+            }
+        }
     }
 
     private static func refreshS3(client: S3Client, prefix: String, session: URLSession,
@@ -95,6 +109,7 @@ enum StorageInventory {
         }
         guard store.replaceInventory(source: .s3, entries: entries) else { throw BackupStore.Failure.couldNotSave }
         store.setMeta(listedKey(client: client, prefix: prefix), String(Date().timeIntervalSince1970))
+        Log.listing.info("Bucket listed: \(objects.count) objects, \(entries.count) library files")
     }
 
     /// Whether uploads to this bucket can ask to be refused if a name is taken, the last guard
@@ -109,7 +124,7 @@ enum StorageInventory {
         do {
             return try await checkConditionalWrites(client: client, prefix: prefix, session: session)
         } catch {
-            print("Couldn't check for conditional writes: \(error)")
+            Log.upload.error("Couldn't check for conditional writes: \(error)")
             return known?.first.map { $0 == "1" } ?? true
         }
     }
@@ -169,8 +184,9 @@ enum StorageInventory {
             try await client.putObject(key: handledKey(prefix: prefix), data: HandledPathsFile.encode(store.handledEntries()),
                                        contentType: "application/x-ndjson", session: session)
             store.setMeta(key, String(version))
+            Log.handledPaths.info("Wrote handled paths to the bucket at version \(version)")
         } catch {
-            print("Couldn't write handled paths to the bucket: \(error)")
+            Log.handledPaths.error("Couldn't write handled paths to the bucket: \(error)")
         }
     }
 
