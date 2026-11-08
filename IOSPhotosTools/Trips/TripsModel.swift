@@ -29,9 +29,11 @@ final class TripsModel {
     /// Newest first.
     private(set) var trips: [Trip] = []
 
-    private var stored = TripStore.load() {
-        didSet { if stored != oldValue { TripStore.save(stored) } }
+    /// Read from disk at the start of the first sync, off the main thread.
+    private var stored: [UUID: StoredTrip] = [:] {
+        didSet { if storedIsLoaded && stored != oldValue { TripStore.save(stored) } }
     }
+    private var storedIsLoaded = false
     private var detected: [UUID: DetectedTrip] = [:]
     private var order: [UUID] = []
     private var sync: Task<Void, Never>?
@@ -79,6 +81,11 @@ final class TripsModel {
         phase = "Looking for trips…"
         defer { isSyncing = false }
 
+        if !storedIsLoaded {
+            let loaded = await Task.detached { TripStore.load() }.value
+            stored = loaded
+            storedIsLoaded = true
+        }
         let snapshot = await LibrarySnapshot.current()
         let (found, modified) = await Task.detached {
             let library = snapshot.tripPhotos()
@@ -168,17 +175,29 @@ final class TripsModel {
         publish()
     }
 
+    /// What picking needs from the library and the analysis cache, found off the main thread.
+    private struct PickInputs: @unchecked Sendable {
+        let assets: [String: PHAsset]
+        let analyses: [String: PhotoAnalysis]
+        let pending: [PHAsset]
+    }
+
     /// Chooses photos from each site, analyzing any that haven't been yet. Nil if cancelled.
     private func pick(_ trip: DetectedTrip, title: String) async -> [String]? {
         let ids = trip.photoIDs
-        var assets: [String: PHAsset] = [:]
-        PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
-            assets[asset.localIdentifier] = asset
-        }
-        var analyses = AnalysisStore.shared.analyses(ids)
-        let pending = assets.values.filter {
-            LibraryAnalyzer.needsAnalysis($0, cached: analyses[$0.localIdentifier], minVersion: PhotoAnalyzer.version)
-        }
+        let inputs = await Task.detached { () -> PickInputs in
+            var assets: [String: PHAsset] = [:]
+            PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
+                assets[asset.localIdentifier] = asset
+            }
+            let analyses = AnalysisStore.shared.analyses(ids)
+            let pending = assets.values.filter {
+                LibraryAnalyzer.needsAnalysis($0, cached: analyses[$0.localIdentifier], minVersion: PhotoAnalyzer.version)
+            }
+            return PickInputs(assets: assets, analyses: analyses, pending: pending)
+        }.value
+        var analyses = inputs.analyses
+        let pending = inputs.pending
         var done = 0
         if !pending.isEmpty { phase = "Analyzing \(title) (0 of \(pending.count))" }
         await LibraryAnalyzer.analyze(pending) { id, result in
@@ -191,22 +210,26 @@ final class TripsModel {
         }
         guard !Task.isCancelled else { return nil }
 
-        return trip.sites.flatMap { site in
-            let candidates = site.photoIDs.compactMap { id -> DuplicateCandidate? in
-                guard let asset = assets[id], let analysis = analyses[id] else { return nil }
-                return DuplicateCandidate(analysis: analysis, asset: asset)
+        let assets = inputs.assets
+        let analyzed = analyses
+        return await Task.detached {
+            trip.sites.flatMap { site in
+                let candidates = site.photoIDs.compactMap { id -> DuplicateCandidate? in
+                    guard let asset = assets[id], let analysis = analyzed[id] else { return nil }
+                    return DuplicateCandidate(analysis: analysis, asset: asset)
+                }
+                // Keep only the best of each set of retakes, so a site's picks aren't the same shot.
+                let retakes = Set(DuplicateGrouper.groups(candidates).flatMap { $0.assetIDs.dropFirst() })
+                let shots = candidates.filter { !retakes.contains($0.id) }.map { c in
+                    let a = analyzed[c.id]!
+                    return PickCandidate(id: c.id, aesthetics: a.aesthetics, isUtility: a.isUtility,
+                                         faceCount: a.faceCount, faceArea: a.faceArea, personArea: a.personArea,
+                                         faceQuality: a.faceQuality, sharpness: a.sharpness,
+                                         isFavorite: c.isFavorite, isEdited: c.isEdited, featurePrint: a.featurePrint)
+                }
+                return TripPicker.picks(shots)
             }
-            // Keep only the best of each set of retakes, so a site's picks aren't the same shot.
-            let retakes = Set(DuplicateGrouper.groups(candidates).flatMap { $0.assetIDs.dropFirst() })
-            let shots = candidates.filter { !retakes.contains($0.id) }.map { c in
-                let a = analyses[c.id]!
-                return PickCandidate(id: c.id, aesthetics: a.aesthetics, isUtility: a.isUtility,
-                                     faceCount: a.faceCount, faceArea: a.faceArea, personArea: a.personArea,
-                                     faceQuality: a.faceQuality, sharpness: a.sharpness,
-                                     isFavorite: c.isFavorite, isEdited: c.isEdited, featurePrint: a.featurePrint)
-            }
-            return TripPicker.picks(shots)
-        }
+        }.value
     }
 
     /// Names the trip after the towns where most of its photos were taken, e.g. "Lisbon & Sintra".

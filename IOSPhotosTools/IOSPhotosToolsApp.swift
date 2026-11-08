@@ -42,9 +42,22 @@ struct IOSPhotosToolsApp: App {
                 wasInBackground = true
                 DriveMonitor.shared.stop()
                 BackgroundTasks.schedule()
+                flushTripStore()
             default:
                 break
             }
+        }
+    }
+
+    /// Writes trip changes still waiting for their delay, before the app is suspended.
+    private func flushTripStore() {
+        var task = UIBackgroundTaskIdentifier.invalid
+        task = UIApplication.shared.beginBackgroundTask(withName: "Save trips") {
+            UIApplication.shared.endBackgroundTask(task)
+        }
+        Task.detached {
+            TripStore.flush()
+            await UIApplication.shared.endBackgroundTask(task)
         }
     }
 }

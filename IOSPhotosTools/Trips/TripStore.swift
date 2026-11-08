@@ -1,4 +1,5 @@
 import Foundation
+import SyncKit
 
 /// What the app remembers about a trip between runs: its album, and the changes the user made
 /// to the automatic picks (here or in Photos).
@@ -35,12 +36,23 @@ struct StoredTrip: Codable, Identifiable, Equatable, Sendable {
     var wanted: Set<String> { Set(picks).union(added).subtracting(removed) }
 }
 
-/// Saves trips as a small JSON file. There are at most a few hundred, so this is plenty.
+/// Saves trips as a small JSON file. There are at most a few hundred, so this is plenty. Saves
+/// are batched and written off the main thread; `flush()` writes what's waiting.
 enum TripStore {
     private static var url: URL {
         AppDirectories.support.appendingPathComponent("trips.json")
     }
 
+    private static let writer = DebouncedWriter<[UUID: StoredTrip]>(delay: 1) { trips in
+        do {
+            try JSONEncoder().encode(Array(trips.values)).write(to: url, options: .atomic)
+            Log.background.info("Saved \(trips.count) trips")
+        } catch {
+            Log.background.error("Couldn't save trips: \(error, privacy: .public)")
+        }
+    }
+
+    /// Reads the file, so call it off the main thread.
     static func load() -> [UUID: StoredTrip] {
         guard let data = try? Data(contentsOf: url),
               let trips = try? JSONDecoder().decode([StoredTrip].self, from: data) else { return [:] }
@@ -48,10 +60,11 @@ enum TripStore {
     }
 
     static func save(_ trips: [UUID: StoredTrip]) {
-        do {
-            try JSONEncoder().encode(Array(trips.values)).write(to: url, options: .atomic)
-        } catch {
-            print("Couldn't save trips: \(error)")
-        }
+        writer.submit(trips)
+    }
+
+    /// Writes any change still waiting and returns once it's on disk. Not for the main thread.
+    static func flush() {
+        writer.flush()
     }
 }
