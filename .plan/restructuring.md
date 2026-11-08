@@ -636,6 +636,8 @@ hangs report).
 - **D1, per-destination schema.** F1 makes switching buckets reset that bucket's history instead.
 - **D2, persistent change tokens.** Step 6's single enumeration per activation is enough.
 - **D3, finding imports from the album.** The full scan stays.
+- **Step 9, reusing comparison exports (2026-11-08).** After step S only edited versions and photos
+  whose size can't be read are compared in full, so the saving is small for a medium-risk change.
 
 ## Not in this plan
 
