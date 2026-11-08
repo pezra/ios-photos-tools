@@ -88,11 +88,10 @@ enum StorageInventory {
 
     private static func refreshS3(client: S3Client, prefix: String, session: URLSession,
                                   progress: ((Int) async -> Void)?) async throws {
-        let root = prefix.isEmpty ? "" : "\(prefix)/"
-        let objects = try await client.listObjects(prefix: root, session: session, progress: progress)
+        let objects = try await client.listObjects(prefix: LibraryPath.key(prefix: prefix, path: ""), session: session, progress: progress)
         let entries = objects.compactMap { object -> InventoryEntry? in
-            let path = String(object.key.dropFirst(root.count))
-            return LibraryPath.isLibraryContent(path) ? InventoryEntry(source: .s3, path: path, size: object.size) : nil
+            guard let path = LibraryPath.path(fromKey: object.key, prefix: prefix), LibraryPath.isLibraryContent(path) else { return nil }
+            return InventoryEntry(source: .s3, path: path, size: object.size)
         }
         guard store.replaceInventory(source: .s3, entries: entries) else { throw BackupStore.Failure.couldNotSave }
         store.setMeta(listedKey(client: client, prefix: prefix), String(Date().timeIntervalSince1970))

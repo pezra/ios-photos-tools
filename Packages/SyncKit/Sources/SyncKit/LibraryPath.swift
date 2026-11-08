@@ -75,6 +75,13 @@ public enum LibraryPath {
     public static func key(prefix: String, path: String) -> String {
         prefix.isEmpty ? path : "\(prefix)/\(path)"
     }
+
+    /// The path of a bucket key under the bucket's folder, the reverse of `key(prefix:path:)`. Nil
+    /// for a key outside the folder.
+    public static func path(fromKey objectKey: String, prefix: String) -> String? {
+        let folder = key(prefix: prefix, path: "")
+        return objectKey.hasPrefix(folder) ? String(objectKey.dropFirst(folder.count)) : nil
+    }
 }
 
 public extension URL {
