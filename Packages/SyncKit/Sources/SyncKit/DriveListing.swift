@@ -69,7 +69,9 @@ public struct DriveListing {
             var batch: [InventoryEntry] = []
             var subfolders: [String] = []
             var replacing = state.after == nil
-            func save(after: String?) throws {
+            /// `finished` takes the folder off the list in the same save that adds its subfolders,
+            /// so being stopped in between can't list them twice.
+            func save(after: String?, finished: Bool = false) throws {
                 guard store.addInventory(source: .drive, entries: batch, replacingFolder: replacing ? folder : nil) else {
                     throw Failure.couldNotSave
                 }
@@ -77,6 +79,7 @@ public struct DriveListing {
                 state.pending += subfolders
                 state.folders += subfolders
                 state.after = after
+                if finished { state.pending.removeFirst() }
                 saveState()
                 batch = []
                 subfolders = []
@@ -110,9 +113,7 @@ public struct DriveListing {
                 }
             }
             try checkReachable()
-            try save(after: nil)
-            state.pending.removeFirst()
-            saveState()
+            try save(after: nil, finished: true)
             await progress?(state.found)
         }
 
