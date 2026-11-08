@@ -67,6 +67,17 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertNotNil(store.completedAssets()["a"])
     }
 
+    func testUploadDestinationIsWhereTheUploadWent() {
+        open()
+        XCTAssertNil(store.uploadDestination(ofResource: "a#1"))
+        add([row("a#1", "a", "2026/A 1.HEIC")], asset: "a")
+        XCTAssertNil(store.uploadDestination(ofResource: "a#1"), "not sent yet")
+        upload("a#1")
+        let sent = store.uploadDestination(ofResource: "a#1")
+        XCTAssertEqual(sent?.path, "2026/A 1.HEIC")
+        XCTAssertEqual(sent?.bucket, "svc/A/p")
+    }
+
     // MARK: - Taking a new name during an upload
 
     func testUploadToAnOldNameIsSentAgainToTheNewOne() {
@@ -341,6 +352,7 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertTrue(useBucket("B"), "the user moved on while it was uploading")
 
         XCTAssertEqual(store.requestConditionalWritesRecheck(afterUploadOf: "a#1"), "svc/A/p")
+        XCTAssertNil(store.requestConditionalWritesRecheck(afterUploadOf: "a#1"), "only the first refusal says so")
         XCTAssertTrue(store.needsConditionalWritesRecheck(bucket: "svc/A/p"))
         XCTAssertFalse(store.needsConditionalWritesRecheck(bucket: "svc/B/p"))
 

@@ -183,6 +183,15 @@ public final class BackupStore: @unchecked Sendable {
         }
     }
 
+    /// Where the file's last upload was sent: its path, and the bucket if recorded.
+    public func uploadDestination(ofResource id: String) -> (path: String, bucket: String?)? {
+        locked {
+            query("SELECT upload_path, upload_bucket FROM resources WHERE id = ?", [id]) { stmt in
+                text(stmt, 0).map { (path: $0, bucket: text(stmt, 1)) }
+            }.first ?? nil
+        }
+    }
+
     public func stagedName(forResource id: String) -> String? {
         locked { query("SELECT staged_name FROM resources WHERE id = ?", [id]) { text($0, 0) }.first ?? nil }
     }
@@ -351,15 +360,15 @@ public final class BackupStore: @unchecked Sendable {
     /// Notes that an upload was turned away for asking to be refused if its name was taken, which
     /// means the bucket's last answer on whether it can is out of date. It's the bucket the upload
     /// was sent to that is to be asked again, not whichever one is chosen now (the current one, for an
-    /// upload that doesn't say). Returns that bucket.
+    /// upload that doesn't say). Returns that bucket, or nil if it was already to be asked again.
     @discardableResult
     public func requestConditionalWritesRecheck(afterUploadOf resourceID: String) -> String? {
         locked {
             let sent = query("SELECT upload_bucket FROM resources WHERE id = ?", [resourceID]) { text($0, 0) }.first ?? nil
             let current = query("SELECT value FROM meta WHERE key = 'current-bucket'") { text($0, 0) }.first ?? nil
             guard let bucket = sent ?? current else { return nil }
-            execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')", [Destination.bucket(bucket).recheckConditionalWritesKey])
-            return bucket
+            execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, '1')", [Destination.bucket(bucket).recheckConditionalWritesKey])
+            return db.changes > 0 ? bucket : nil
         }
     }
 
