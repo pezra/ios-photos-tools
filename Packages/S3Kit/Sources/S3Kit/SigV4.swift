@@ -22,6 +22,9 @@ enum SigV4 {
 
     static func sha256Hex(_ data: Data) -> String { hex(SHA256.hash(data: data)) }
 
+    /// The payload hash of a request with no body.
+    static let emptyPayloadHash = sha256Hex(Data())
+
     static func hmac(_ key: Data, _ message: String) -> Data {
         Data(HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: SymmetricKey(data: key)))
     }

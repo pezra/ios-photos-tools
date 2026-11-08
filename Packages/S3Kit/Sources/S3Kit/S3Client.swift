@@ -239,7 +239,7 @@ public struct S3Client: Sendable {
             try Task.checkCancellation()
             var query = [("list-type", "2"), ("prefix", prefix)]
             if let token { query.append(("continuation-token", token)) }
-            let request = signedRequest(method: "GET", key: nil, query: query, payloadHash: SigV4.sha256Hex(Data()))
+            let request = signedRequest(method: "GET", key: nil, query: query, payloadHash: SigV4.emptyPayloadHash)
             let (body, response) = try await session.data(for: request)
             let page = try S3ListPage(xml: try checked(body, response))
             objects += page.objects
@@ -251,14 +251,14 @@ public struct S3Client: Sendable {
 
     /// The contents of an object, for small ones. Needs `s3:GetObject`.
     public func getObject(key: String, session: URLSession = .shared) async throws -> Data {
-        let request = signedRequest(method: "GET", key: key, payloadHash: SigV4.sha256Hex(Data()))
+        let request = signedRequest(method: "GET", key: key, payloadHash: SigV4.emptyPayloadHash)
         let (body, response) = try await session.data(for: request)
         return try checked(body, response)
     }
 
     /// Downloads an object to a temporary file, which the caller must move or delete.
     public func downloadObject(key: String, session: URLSession = .shared) async throws -> URL {
-        let request = signedRequest(method: "GET", key: key, payloadHash: SigV4.sha256Hex(Data()))
+        let request = signedRequest(method: "GET", key: key, payloadHash: SigV4.emptyPayloadHash)
         let (file, response) = try await session.download(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
