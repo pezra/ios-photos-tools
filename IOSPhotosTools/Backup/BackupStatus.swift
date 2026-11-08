@@ -26,6 +26,8 @@ final class BackupStatus {
 
     private var listingLibrary = false
     private var coverageRefreshScheduled = false
+    private var countsInFlight = false
+    private var countsRerun = false
 
     private init() {
         coverage = UserDefaults.standard.data(forKey: "coverage")
@@ -56,14 +58,35 @@ final class BackupStatus {
         refreshCounts()
     }
 
+    /// The store's lock is held through long transactions, and this is called for every file backed
+    /// up, so the counts are read off the main thread. One read runs at a time; calls while it runs
+    /// share one more read afterwards. Results apply here one after another, so an old one can't
+    /// land after a newer one.
     func refreshCounts() {
-        let store = BackupStore.shared
-        uploading = store.count(.uploading)
-        failed = store.count(.failed)
+        guard !countsInFlight else { countsRerun = true; return }
+        countsInFlight = true
+        Task {
+            repeat {
+                countsRerun = false
+                let counts = await Task.detached(priority: .utility) {
+                    let store = BackupStore.shared
+                    let failed = store.count(.failed)
+                    return (uploading: store.count(.uploading), failed: failed,
+                            lastError: failed > 0 ? store.lastError() : nil)
+                }.value
+                apply(counts)
+            } while countsRerun
+            countsInFlight = false
+        }
+    }
+
+    private func apply(_ counts: (uploading: Int, failed: Int, lastError: String?)) {
+        uploading = counts.uploading
+        failed = counts.failed
         // A pass that ended with uploads going shows how they went once they've finished.
         if !pass.isRunning && pass.phase == Self.waitingForUploads && uploading == 0 {
             pass.report(phase: failed > 0 ? "Finished with \(failed) failed files" : "Up to date", running: false,
-                        error: failed > 0 ? store.lastError() : nil, finished: true)
+                        error: failed > 0 ? counts.lastError : nil, finished: true)
         }
         scheduleCoverageRefresh()
     }
