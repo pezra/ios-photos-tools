@@ -495,6 +495,48 @@ public final class BackupStore: @unchecked Sendable {
         }
     }
 
+    /// Adds part of a listing that's saved as it goes. `replacingFolder` starts that folder's
+    /// listing over, forgetting the files directly in it ("" is the top). Returns false, changing
+    /// nothing, if it couldn't be saved.
+    public func addInventory(source: StorageSource, entries: [InventoryEntry], replacingFolder folder: String? = nil) -> Bool {
+        let rows = entries.map { (norm: LibraryPath.normalized($0.path), path: $0.path, size: $0.size) }
+        return locked {
+            transaction {
+                if let folder { deleteInventory(source: source, folder: LibraryPath.normalized(folder)) }
+                try insert("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)", [source.rawValue], rows: rows) { stmt, row in
+                    sqlite3_bind_text(stmt, 2, row.norm, -1, Self.transient)
+                    sqlite3_bind_text(stmt, 3, row.path, -1, Self.transient)
+                    sqlite3_bind_int64(stmt, 4, row.size)
+                }
+            }
+        }
+    }
+
+    /// Forgets the files in every folder but `folders`, once a listing saved as it went has
+    /// finished. Only files directly in a folder count as in it; "" is the top.
+    public func keepInventory(source: StorageSource, onlyInFolders folders: Set<String>) -> Bool {
+        let keep = Set(folders.map(LibraryPath.normalized))
+        return locked {
+            let present = Set(query("SELECT norm FROM remote_files WHERE source = ?", [source.rawValue]) { text($0, 0) ?? "" }
+                .map { ($0 as NSString).deletingLastPathComponent })
+            return transaction {
+                for folder in present.subtracting(keep) { deleteInventory(source: source, folder: folder) }
+            }
+        }
+    }
+
+    /// `folder` is normalized.
+    private func deleteInventory(source: StorageSource, folder: String) {
+        if folder.isEmpty {
+            execute("DELETE FROM remote_files WHERE source = ? AND instr(norm, '/') = 0", [source.rawValue])
+        } else {
+            // SQLite counts characters as code points.
+            let length = folder.unicodeScalars.count
+            execute("DELETE FROM remote_files WHERE source = ? AND substr(norm, 1, ?) = ? AND instr(substr(norm, ?), '/') = 0",
+                    [source.rawValue, length + 1, folder + "/", length + 2])
+        }
+    }
+
     public func inventory() -> [InventoryEntry] {
         locked {
             query("SELECT source, path, size FROM remote_files", [], inventoryEntry)

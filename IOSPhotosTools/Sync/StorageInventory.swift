@@ -22,37 +22,17 @@ enum StorageInventory {
 
     // MARK: - Drive
 
-    /// Brings the record of handled paths and the listing of the drive up to date. `progress` is
-    /// told how many files have been found so far, since a big drive takes minutes to list.
+    /// A listing this recent is used as it is, so a sync straight after a drive backup doesn't
+    /// read the whole drive again.
+    private static let driveListingFreshFor: TimeInterval = 10 * 60
+
+    /// Brings the record of handled paths and the listing of the drive up to date. The listing is
+    /// saved as it goes, so one cut short carries on next time. `progress` is told how many files
+    /// have been found so far.
     static func prepareDrive(root: URL, driveID: String, progress: ((Int) async -> Void)? = nil) async throws {
         try mergeHandledPaths(fromDrive: root, driveID: driveID)
-        try await refreshDrive(root: root, progress: progress)
-    }
-
-    private static func refreshDrive(root: URL, progress: ((Int) async -> Void)?) async throws {
-        let entries = try await walk(root: root, progress: progress)
-        // A walk cut short by the drive being unplugged would look like missing files.
-        guard (try? root.checkResourceIsReachable()) == true else { throw CocoaError(.fileNoSuchFile) }
-        guard store.replaceInventory(source: .drive, entries: entries) else { throw Failure.couldNotSave }
-    }
-
-    private static func walk(root: URL, progress: ((Int) async -> Void)?) async throws -> [InventoryEntry] {
-        guard let enumerator = FileManager.default.enumerator(atPath: root.path) else { return [] }
-        var entries: [InventoryEntry] = []
-        var visited = 0
-        for case let path as String in enumerator {
-            visited += 1
-            if visited % 500 == 0 {
-                try Task.checkCancellation()
-                await progress?(entries.count)
-            }
-            guard enumerator.fileAttributes?[.type] as? FileAttributeType == .typeRegular,
-                  LibraryPath.isLibraryContent(path),
-                  let size = enumerator.fileAttributes?[.size] as? NSNumber
-            else { continue }
-            entries.append(InventoryEntry(source: .drive, path: path, size: size.int64Value))
-        }
-        return entries
+        try await DriveListing(store: store, root: root, key: "drive-listing-\(driveID)")
+            .run(freshFor: driveListingFreshFor, progress: progress)
     }
 
     private static func mergeHandledPaths(fromDrive root: URL, driveID: String) throws {

@@ -249,6 +249,32 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertEqual(store.inventory().map(\.path), ["keep/a.jpg"])
     }
 
+    func testFailedPartOfAListingKeepsWhatWasThere() {
+        openWithFailures()
+        XCTAssertTrue(store.addInventory(source: .s3, entries: [entry("2019/a.jpg")]))
+        XCTAssertFalse(store.addInventory(source: .s3, entries: [entry("2019/b.jpg"), entry("boom/c.jpg")], replacingFolder: "2019"))
+        XCTAssertEqual(store.inventory().map(\.path), ["2019/a.jpg"])
+    }
+
+    func testListingAFolderAgainOnlyForgetsWhatsDirectlyInIt() {
+        open()
+        XCTAssertTrue(store.addInventory(source: .s3, entries: [
+            entry("top.jpg"), entry("2019/a.jpg"), entry("2019/trip/b.jpg"), entry("2019 x/c.jpg"), entry("2020/d.jpg"),
+        ]))
+        XCTAssertTrue(store.addInventory(source: .s3, entries: [entry("2019/e.jpg")], replacingFolder: "2019"))
+        XCTAssertEqual(Set(store.inventory().map(\.path)), ["top.jpg", "2019/e.jpg", "2019/trip/b.jpg", "2019 x/c.jpg", "2020/d.jpg"])
+        XCTAssertTrue(store.addInventory(source: .s3, entries: [], replacingFolder: ""))
+        XCTAssertEqual(Set(store.inventory().map(\.path)), ["2019/e.jpg", "2019/trip/b.jpg", "2019 x/c.jpg", "2020/d.jpg"])
+    }
+
+    func testFinishedListingForgetsFoldersThatAreGone() {
+        open()
+        XCTAssertTrue(store.addInventory(source: .s3, entries: [entry("top.jpg"), entry("Ä/a.jpg"), entry("2019/trip/b.jpg"), entry("2020/c.jpg")]))
+        XCTAssertTrue(store.addInventory(source: .drive, entries: [InventoryEntry(source: .drive, path: "2020/d.jpg", size: 1)]))
+        XCTAssertTrue(store.keepInventory(source: .s3, onlyInFolders: ["", "ä", "2019"]))
+        XCTAssertEqual(Set(store.inventory().map(\.path)), ["top.jpg", "Ä/a.jpg", "2020/d.jpg"])
+    }
+
     func testFailedClaimChangesNothing() {
         openWithFailures()
         let version = store.handledVersion
