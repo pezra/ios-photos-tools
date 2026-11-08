@@ -94,7 +94,8 @@ enum PhotoLibrary {
 
     /// Like `export`, but writes the bytes from this process, so files on a security-scoped
     /// location such as a USB drive don't depend on the Photos service being able to reach it.
-    static func stream(_ resource: PHAssetResource, to url: URL) async throws {
+    /// `progress` hears of the download from iCloud and of the bytes written.
+    static func stream(_ resource: PHAssetResource, to url: URL, progress: TransferReporter? = nil) async throws {
         Log.export.info("Streaming \(resource.originalFilename, privacy: .public)")
         let signpost = Log.signposter.beginInterval("export", id: Log.signposter.makeSignpostID())
         defer { Log.signposter.endInterval("export", signpost) }
@@ -112,6 +113,7 @@ enum PhotoLibrary {
             private var isCancelled = false
             /// Only touched by the data and completion handlers, which run one at a time.
             var writeError: Error?
+            var written: Int64 = 0
 
             func started(_ id: PHAssetResourceDataRequestID) {
                 let cancelNow = lock.withLock {
@@ -132,12 +134,17 @@ enum PhotoLibrary {
         let request = Request()
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
+        if let progress {
+            options.progressHandler = { progress.downloaded($0) }
+        }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let id = PHAssetResourceManager.default().requestData(for: resource, options: options) { data in
                     guard request.writeError == nil else { return }
                     do {
                         try handle.write(contentsOf: data)
+                        request.written += Int64(data.count)
+                        progress?.wrote(request.written)
                     } catch {
                         request.writeError = error
                         request.cancel()

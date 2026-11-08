@@ -45,7 +45,7 @@ actor DriveBackupEngine {
 
         await report(phase: "Checking library…", running: true, startingPass: true)
         let pending = await LibrarySnapshot.current().pending(completed: store.completedDriveAssets(driveID: driveID))
-        ContinuedRunTask.progress(.drive, done: 0, of: pending.count)
+        ContinuedRunTask.update(.drive, .work, completed: 0, of: pending.count)
 
         // Names are checked against what's on the drive and in the bucket so nothing is overwritten,
         // and the sync needs the drive's listing too.
@@ -55,6 +55,7 @@ actor DriveBackupEngine {
             return await report(phase: Task.isCancelled ? BackupRun.pausedPhase : "Couldn't check what's in storage", running: false,
                                 error: Task.isCancelled ? nil : error.localizedDescription)
         }
+        ContinuedRunTask.finish(.drive, .listing)
         await run.barrier.ready(.drive)
 
         var failed = 0
@@ -62,10 +63,9 @@ actor DriveBackupEngine {
         var disconnected = false
         for (index, asset) in pending.enumerated() {
             if Task.isCancelled { break }
-            ContinuedRunTask.progress(.drive, done: index, of: pending.count)
             await report(phase: "Copying \(index + 1) of \(pending.count)", running: true)
             let error = await run.photoLock.withLock(asset.localIdentifier) {
-                await copy(asset, to: root, driveID: driveID)
+                await copy(asset, to: root, driveID: driveID, progress: PhotoProgress(part: .drive, index: index, total: pending.count))
             }
             await StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: false)
             guard let error else { continue }
@@ -77,7 +77,7 @@ actor DriveBackupEngine {
             lastError = error.localizedDescription
             Log.pass.error("drive: \(asset.localIdentifier, privacy: .public) not copied: \(error.localizedDescription, privacy: .public)")
         }
-        ContinuedRunTask.progress(.drive, done: pending.count, of: pending.count)
+        ContinuedRunTask.finish(.drive, .work)
         if !disconnected {
             await StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: true)
         }
@@ -93,9 +93,9 @@ actor DriveBackupEngine {
     private nonisolated func prepare(_ run: Run, root: URL, driveID: String, pending: Int) async throws {
         let needs = RunPlan.needs(.drive, pending: pending, parts: run.plannedParts, setup: run.setup)
         if needs.drive {
-            await showListing("Reading drive…")
+            await showListing("Reading drive…", found: 0)
             try await run.preparation.prepareDrive(root: root, driveID: driveID) { found in
-                await self.showListing("Reading drive… \(found.formatted()) files")
+                await self.showListing("Reading drive… \(found.formatted()) files", found: found)
             }
         }
         guard needs.bucket, let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3) else { return }
@@ -103,7 +103,7 @@ actor DriveBackupEngine {
         defer { session.finishTasksAndInvalidate() }
         do {
             try await run.preparation.prepareBucket(client: client, prefix: settings.prefix, session: session) { listed in
-                await self.showListing("Listing bucket… \(listed.formatted()) files")
+                await self.showListing("Listing bucket… \(listed.formatted()) files", found: listed)
             }
         } catch {
             // The bucket's last listing will do if it can't be reached now, but there must be one.
@@ -112,13 +112,13 @@ actor DriveBackupEngine {
         }
     }
 
-    private func showListing(_ phase: String) async {
-        ContinuedRunTask.listingStep(.drive, phase: phase)
+    private func showListing(_ phase: String, found: Int) async {
+        ContinuedRunTask.update(.drive, .listing, completed: found, of: nil)
         await report(phase: phase, running: true)
     }
 
     /// Whether the file at `existing` has the same contents as `resource`.
-    private func isSameFile(_ resource: PHAssetResource, existing: URL) async throws -> Bool {
+    private func isSameFile(_ resource: PHAssetResource, existing: URL, progress: PhotoProgress, file: Int) async throws -> Bool {
         switch BackupPaths.match(resource, storedSizes: existing.fileSize.map { [$0] } ?? []) {
         case .same: return true
         case .different: return false
@@ -126,16 +126,17 @@ actor DriveBackupEngine {
         }
         let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: copy) }
-        try await PhotoLibrary.stream(resource, to: copy)
+        try await PhotoLibrary.stream(resource, to: copy, progress: progress.transfer(of: resource, file: file, share: 0.5))
         // Saves reading the whole file from the drive. A size that can't be read is left for
         // hashing to report, since it doesn't mean the files differ.
         if let size = copy.fileSize, let existingSize = existing.fileSize, size != existingSize { return false }
-        return try Staging.sha256(of: copy) == Staging.sha256(of: existing)
+        let hash = try Staging.sha256(of: copy) { progress.report(file: file, fraction: 0.5 + 0.25 * $0) }
+        return try hash == Staging.sha256(of: existing) { progress.report(file: file, fraction: 0.75 + 0.25 * $0) }
     }
 
     /// Copies the asset's files that aren't on the drive yet, plus its edited versions (which keep
     /// their name when re-edited). Returns the first error, if any.
-    private func copy(_ listed: PHAsset, to root: URL, driveID: String) async -> Error? {
+    private func copy(_ listed: PHAsset, to root: URL, driveID: String, progress: PhotoProgress) async -> Error? {
         // The snapshot's copy may predate an edit; what's copied and recorded is the current one.
         guard let asset = PhotoLibrary.freshAsset(listed.localIdentifier) else { return nil }
         let fm = FileManager.default
@@ -146,8 +147,11 @@ actor DriveBackupEngine {
         } catch {
             return error
         }
-        for (resource, row) in resources {
+        var progress = progress
+        progress.files = resources.count
+        for (file, (resource, row)) in resources.enumerated() {
             if Task.isCancelled { return nil }
+            progress.report(file: file)
             let destination = root.appending(path: row.path)
             let isEdit = PhotoLibrary.editedTypes.contains(resource.type)
             let isOwn = store.isOnDrive(row.path)
@@ -156,7 +160,7 @@ actor DriveBackupEngine {
             // edit known to be this photo's own gets replaced.
             if fm.fileExists(atPath: destination.path) && !isOwn {
                 do {
-                    guard try await isSameFile(resource, existing: destination) else {
+                    guard try await isSameFile(resource, existing: destination, progress: progress, file: file) else {
                         store.retirePaths(forAsset: asset.localIdentifier)
                         return BackupPaths.Failure.nameTaken(row.path)
                     }
@@ -171,7 +175,7 @@ actor DriveBackupEngine {
             let partial = destination.deletingLastPathComponent().appending(path: ".\(destination.lastPathComponent).partial")
             do {
                 try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try await PhotoLibrary.stream(resource, to: partial)
+                try await PhotoLibrary.stream(resource, to: partial, progress: progress.transfer(of: resource, file: file))
                 // rename(2) replaces an existing edit in one step.
                 guard rename(partial.path, destination.path) == 0 else {
                     throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)

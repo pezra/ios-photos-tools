@@ -1,5 +1,6 @@
 import BackgroundTasks
 import Foundation
+import Photos
 import SyncKit
 
 /// Lets a run the user started keep going after the app is closed, with its progress shown by the
@@ -21,17 +22,21 @@ final class ContinuedRunTask: @unchecked Sendable {
 
     private let lock = NSLock()
     private var state = State.none
-    /// Steps of reading the drive and listing the bucket this run, which count as work done.
-    private var listingSteps = 0
-    private var items: [RunPlan.Part: (done: Int, total: Int)] = [:]
+    /// The run's progress, summed over its steps. Built for every run, whether or not it has a
+    /// task, so the values can be followed in the log where no task can be had.
+    private var aggregate = RunProgress()
+    private var tree: Progress?
+    private var children: [RunProgress.Step: Progress] = [:]
+    private var lastLogged: (fraction: Double, at: Date)?
     /// iOS ends a continued task whose progress hasn't moved for a while (about 30 seconds, going
     /// by other developers' reports). Copying a big video, or downloading it from iCloud first, can
-    /// take longer than that, so while there's a task its progress is nudged along within the
-    /// current step. A step that outlasts the nudges is left to look stalled.
-    private var nudges: Int64 = 0
+    /// take longer than that, so while there's a task its progress is nudged along, a little and
+    /// never far past what has really been done. Work that gives a signal doesn't need it.
     private var heartbeat: Task<Void, Never>?
-    private static let unitsPerStep: Int64 = 100
     private static let nudgeInterval: Duration = .seconds(5)
+    /// The task's progress is this many units, since iOS may only advance whole ones.
+    private static let taskUnits: Int64 = 1000
+    private static let childUnits: Int64 = 1000
 
     private var task: BGContinuedProcessingTask? {
         if case .attached(let task) = state { return task }
@@ -110,11 +115,24 @@ final class ContinuedRunTask: @unchecked Sendable {
 
     // MARK: - The run's progress
 
-    static func runStarted() {
+    /// Builds the tree: a parent with a child per step, each with its fixed share.
+    static func runStarted(parts: @autoclosure () -> Set<RunPlan.Part>) {
         shared.lock.withLock {
-            shared.listingSteps = 0
-            shared.items = [:]
-            shared.nudges = 0
+            shared.aggregate = RunProgress()
+            shared.tree = Progress(totalUnitCount: 0)
+            shared.children = [:]
+            shared.lastLogged = nil
+            shared.add(parts())
+            Log.continuedTask.info("Progress started: \(shared.aggregate.shares.map { "\($0.step.part.rawValue) \($0.step.kind) \($0.share)" }.joined(separator: ", "), privacy: .public)")
+            shared.show()
+        }
+    }
+
+    /// Parts that joined the run after it started.
+    static func partsAdded(_ parts: Set<RunPlan.Part>) {
+        shared.lock.withLock {
+            guard shared.tree != nil else { return }
+            shared.add(parts)
         }
     }
 
@@ -123,24 +141,39 @@ final class ContinuedRunTask: @unchecked Sendable {
     static func runEnded() {
         shared.lock.withLock {
             if case .requested = shared.state { shared.state = .none }
+            shared.log(force: true, note: "run ended")
+            shared.tree = nil
+            shared.children = [:]
         }
     }
 
-    /// A step of reading the drive or listing the bucket.
-    static func listingStep(_ part: RunPlan.Part, phase: String) {
+    /// How far a step has got in its own units. A total that isn't known yet is nil.
+    static func update(_ part: RunPlan.Part, _ kind: RunProgress.Kind, completed: Double, of total: Double?) {
         shared.lock.withLock {
-            shared.listingSteps += 1
-            shared.nudges = 0
-            shared.show(part, phase: phase)
+            guard shared.tree != nil else { return }
+            shared.aggregate.update(.init(part, kind), completed: completed, of: total)
+            shared.show()
         }
     }
 
-    /// How far a part has got through its photos.
-    static func progress(_ part: RunPlan.Part, done: Int, of total: Int, phase: String? = nil) {
+    static func update(_ part: RunPlan.Part, _ kind: RunProgress.Kind, completed: Int, of total: Int?) {
+        update(part, kind, completed: Double(completed), of: total.map(Double.init))
+    }
+
+    static func finish(_ part: RunPlan.Part, _ kind: RunProgress.Kind) {
         shared.lock.withLock {
-            shared.items[part] = (done, total)
-            shared.nudges = 0
-            shared.show(part, phase: phase)
+            guard shared.tree != nil else { return }
+            shared.aggregate.finish(.init(part, kind))
+            shared.show()
+        }
+    }
+
+    /// A part that has ended, however it ended, has nothing more to do.
+    static func partEnded(_ part: RunPlan.Part) {
+        shared.lock.withLock {
+            guard shared.tree != nil else { return }
+            shared.aggregate.finish(part)
+            shared.show()
         }
     }
 
@@ -150,22 +183,104 @@ final class ContinuedRunTask: @unchecked Sendable {
 
     private func nudge() {
         lock.withLock {
-            guard nudges < Self.unitsPerStep - 1 else { return }
-            nudges += 1
+            guard tree != nil else { return }
+            aggregate.nudge()
             show()
         }
     }
 
-    /// With the lock held. The extra step in the total leaves room for nudges once everything's
-    /// counted as done.
+    /// With the lock held.
+    private func add(_ parts: Set<RunPlan.Part>) {
+        guard let tree else { return }
+        for part in RunPlan.Part.allCases where parts.contains(part) && !aggregate.parts.contains(part) {
+            aggregate.add(part)
+            for (step, share) in aggregate.shares where step.part == part {
+                let child = Progress(totalUnitCount: Self.childUnits)
+                tree.totalUnitCount += share
+                tree.addChild(child, withPendingUnitCount: share)
+                children[step] = child
+            }
+        }
+    }
+
+    /// With the lock held. Passes the steps' fractions to their children, and the total to the task.
     private func show(_ part: RunPlan.Part? = nil, phase: String? = nil) {
+        for (step, child) in children {
+            let units = Int64(aggregate.fraction(of: step) * Double(Self.childUnits))
+            if child.completedUnitCount != units { child.completedUnitCount = units }
+        }
+        log(force: false, note: nil)
         guard let task else { return }
         if let phase, let part {
             task.updateTitle(part == .sync ? Self.syncTitle : Self.backupTitle, subtitle: phase)
         }
-        let done = items.values.reduce(0) { $0 + $1.done }
-        let total = items.values.reduce(0) { $0 + $1.total }
-        task.progress.totalUnitCount = Int64(listingSteps + total + 1) * Self.unitsPerStep
-        task.progress.completedUnitCount = Int64(listingSteps + done) * Self.unitsPerStep + nudges
+        // The task's own progress can't be given children after the fact, and the tree may have
+        // been going for a while, so it follows the tree.
+        task.progress.totalUnitCount = Self.taskUnits
+        let units = Int64(aggregate.fraction * Double(Self.taskUnits))
+        if task.progress.completedUnitCount < units { task.progress.completedUnitCount = units }
+    }
+
+    /// With the lock held. At most once a second, or per percent.
+    private func log(force: Bool, note: String?) {
+        let fraction = aggregate.fraction
+        let now = Date()
+        if !force, let last = lastLogged, now.timeIntervalSince(last.at) < 1, fraction - last.fraction < 0.01 { return }
+        guard force || lastLogged?.fraction != fraction else { return }
+        lastLogged = (fraction, now)
+        let treeValue = tree?.fractionCompleted ?? 0
+        let suffix = (task != nil ? ", task attached" : "") + (note.map { ", " + $0 } ?? "")
+        Log.continuedTask.info("Progress \(fraction, format: .fixed(precision: 3)) (tree \(treeValue, format: .fixed(precision: 3)))\(suffix, privacy: .public)")
+    }
+}
+
+/// Where a part is in its photos: which one, and how far through its files. Reported to the run's
+/// progress as photos done plus the part of the current one.
+struct PhotoProgress: Sendable {
+    let part: RunPlan.Part
+    let index: Int
+    let total: Int
+    /// How many files the photo has.
+    var files = 1
+
+    /// `file` is the one being worked on, `fraction` how far through it.
+    func report(file: Int = 0, fraction: Double = 0) {
+        let through = (Double(file) + min(max(fraction, 0), 1)) / Double(max(files, 1))
+        ContinuedRunTask.update(part, .work, completed: Double(index) + through, of: Double(total))
+    }
+
+    /// For a file's transfer: tells the run as bytes arrive and iCloud downloads progress.
+    func transfer(of resource: PHAssetResource, file: Int, share: Double = 1) -> TransferReporter {
+        TransferReporter(size: PhotoLibrary.fileSize(of: resource)) { fraction in
+            self.report(file: file, fraction: fraction * share)
+        }
+    }
+}
+
+/// Collects a file's download and write progress, from whichever threads PhotoKit calls on.
+final class TransferReporter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var transfer: TransferProgress
+    private let report: @Sendable (Double) -> Void
+
+    init(size: Int64?, report: @escaping @Sendable (Double) -> Void) {
+        transfer = TransferProgress(size: size)
+        self.report = report
+    }
+
+    func downloaded(_ fraction: Double) {
+        let value = lock.withLock { () -> Double in
+            transfer.download(fraction)
+            return transfer.fraction()
+        }
+        report(value)
+    }
+
+    func wrote(_ bytes: Int64) {
+        let value = lock.withLock { () -> Double in
+            transfer.wrote(bytes)
+            return transfer.fraction()
+        }
+        report(value)
     }
 }

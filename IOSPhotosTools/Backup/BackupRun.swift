@@ -100,6 +100,7 @@ final class BackupRun: @unchecked Sendable {
             if let current {
                 let added = current.add(RunPlan.joining(trigger, setup: situation.setup))
                 Log.run.info("Run going: \(reason, privacy: .public) joins it\(added.isEmpty ? "" : ", adding \(Self.names(added))", privacy: .public)")
+                ContinuedRunTask.partsAdded(current.plannedParts)
                 return
             }
             let changed = lastSituation.map { $0 != situation } ?? false
@@ -121,7 +122,7 @@ final class BackupRun: @unchecked Sendable {
 
     private func perform(_ run: Run) async {
         Log.run.info("Run started (\(run.reason, privacy: .public)): \(Self.names(run.plannedParts), privacy: .public)")
-        ContinuedRunTask.runStarted()
+        ContinuedRunTask.runStarted(parts: run.plannedParts)
         let backgroundTime = await BackgroundTime.begin()
 
         await step("library snapshot") { _ = await LibrarySnapshot.current() }
@@ -320,6 +321,7 @@ final class Run: @unchecked Sendable {
             case .drive: await DriveBackupEngine.shared.run(in: self)
             case .sync: await LibrarySyncEngine.shared.run(in: self)
             }
+            ContinuedRunTask.partEnded(part)
             self.lock.withLock { self.tasks[part] = nil }
             self.barrier.ended(part)
         }

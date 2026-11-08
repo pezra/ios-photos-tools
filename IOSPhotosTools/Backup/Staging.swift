@@ -26,15 +26,20 @@ enum Staging {
         try? FileManager.default.removeItem(at: url(for: name))
     }
 
-    static func sha256(of file: URL) throws -> String {
+    /// `progress` is told how far through the file the hashing has got, from 0 to 1.
+    static func sha256(of file: URL, progress: ((Double) -> Void)? = nil) throws -> String {
         Log.hash.info("Hashing \(file.lastPathComponent, privacy: .public)")
         let signpost = Log.signposter.beginInterval("hash", id: Log.signposter.makeSignpostID())
         defer { Log.signposter.endInterval("hash", signpost) }
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
+        let size = progress == nil ? 0 : Double(file.fileSize ?? 0)
         var hasher = SHA256()
+        var read = 0.0
         while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
             hasher.update(data: chunk)
+            read += Double(chunk.count)
+            if size > 0 { progress?(min(read / size, 1)) }
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }

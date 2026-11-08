@@ -78,6 +78,7 @@ actor LibrarySyncEngine {
         let reachedS3: Bool
         do {
             reachedS3 = try await prepareInventory(sources, preparation: preparation)
+            ContinuedRunTask.finish(.sync, .listing)
             await report(phase: "Checking library…", running: true)
             try await scanForImportsIfNeeded()
         } catch {
@@ -136,6 +137,7 @@ actor LibrarySyncEngine {
             for item in ready { try? FileManager.default.removeItem(at: item.output.file) }
 
             await writeHandledPaths(sources, force: false)
+            ContinuedRunTask.update(.sync, .work, completed: start + batch.count, of: pending.count)
             await refreshCounts(remaining: pending.count - start - batch.count, failed: failed)
         }
 
@@ -163,13 +165,13 @@ actor LibrarySyncEngine {
         if let drive = sources.drive {
             // Counted as progress, since iOS ends a continued task whose progress stops moving.
             try await preparation.prepareDrive(root: drive.root, driveID: drive.id) { found in
-                await self.showListing("Reading drive… \(found.formatted()) files")
+                await self.showListing("Reading drive… \(found.formatted()) files", found: found)
             }
         }
         guard let bucket = sources.bucket else { return false }
         do {
             try await preparation.prepareBucket(client: bucket.client, prefix: bucket.prefix, session: bucket.session) { listed in
-                await self.showListing("Listing bucket… \(listed.formatted()) files")
+                await self.showListing("Listing bucket… \(listed.formatted()) files", found: listed)
             }
             return true
         } catch {
@@ -373,18 +375,17 @@ actor LibrarySyncEngine {
 
     // MARK: - Status
 
-    private func showListing(_ phase: String) async {
-        ContinuedRunTask.listingStep(.sync, phase: phase)
+    private func showListing(_ phase: String, found: Int) async {
+        ContinuedRunTask.update(.sync, .listing, completed: found, of: nil)
         await report(phase: phase, running: true)
     }
 
     private func report(phase: String, running: Bool, error: String? = nil, finished: Bool = false, startingPass: Bool = false, done: Int? = nil, total: Int? = nil) async {
         Log.pass.log(phase: phase, of: "sync", running: running, startingPass: startingPass)
         if let done, let total {
-            ContinuedRunTask.progress(.sync, done: done, of: total, phase: phase)
-        } else {
-            ContinuedRunTask.phase(.sync, phase)
+            ContinuedRunTask.update(.sync, .work, completed: done, of: total)
         }
+        ContinuedRunTask.phase(.sync, phase)
         await MainActor.run {
             SyncStatus.shared.report(phase: phase, running: running, error: error, finished: finished, startingPass: startingPass)
         }

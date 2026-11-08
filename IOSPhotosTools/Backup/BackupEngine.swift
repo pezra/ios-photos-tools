@@ -103,7 +103,7 @@ actor BackupEngine {
         if RunPlan.needs(.bucket, pending: pending.count, parts: run.plannedParts, setup: run.setup).bucket {
             do {
                 try await run.preparation.prepareBucket(client: client, prefix: settings.prefix, session: session) { listed in
-                    await self.showListing("Listing bucket… \(listed.formatted()) files")
+                    await self.showListing("Listing bucket… \(listed.formatted()) files", found: listed)
                 }
                 conditionalWrites = await StorageInventory.supportsConditionalWrites(client: client, prefix: settings.prefix, session: session)
             } catch let error as URLError where error.networkUnavailableReason == .cellular {
@@ -119,6 +119,8 @@ actor BackupEngine {
             }
         }
 
+        ContinuedRunTask.finish(.bucket, .listing)
+        ContinuedRunTask.update(.bucket, .work, completed: 0, of: pending.count)
         await run.barrier.ready(.bucket)
 
         var namingFailures = 0
@@ -130,10 +132,10 @@ actor BackupEngine {
                 stoppedEarly = !Task.isCancelled
                 break
             }
-            ContinuedRunTask.progress(.bucket, done: index, of: pending.count)
             await report(phase: "Preparing \(index + 1) of \(pending.count)", running: true)
             let error = await run.photoLock.withLock(asset.localIdentifier) {
-                await stage(asset, client: client, settings: settings, conditionalWrites: conditionalWrites)
+                await stage(asset, client: client, settings: settings, conditionalWrites: conditionalWrites,
+                            progress: PhotoProgress(part: .bucket, index: index, total: pending.count))
             }
             if let error {
                 namingFailures += 1
@@ -149,7 +151,7 @@ actor BackupEngine {
 
         let failed = store.count(.failed) + namingFailures
         let uploading = store.count(.uploading)
-        ContinuedRunTask.progress(.bucket, done: pending.count, of: pending.count)
+        ContinuedRunTask.finish(.bucket, .work)
         let phase = Task.isCancelled ? BackupRun.pausedPhase
             : failed > 0 ? "Finished with \(failed) failed files"
             : uploading > 0 ? BackupStatus.waitingForUploads
@@ -158,7 +160,8 @@ actor BackupEngine {
     }
 
     /// Returns an error if the asset's files couldn't be given paths, so it's tried again next pass.
-    private func stage(_ listed: PHAsset, client: S3Client, settings: SettingsStore.Snapshot, conditionalWrites: Bool) async -> Error? {
+    private func stage(_ listed: PHAsset, client: S3Client, settings: SettingsStore.Snapshot, conditionalWrites: Bool,
+                       progress: PhotoProgress) async -> Error? {
         let assetID = listed.localIdentifier
         // The snapshot's copy may predate an edit; what's exported and recorded is the current one.
         guard let asset = PhotoLibrary.freshAsset(assetID) else { return nil }
@@ -180,8 +183,11 @@ actor BackupEngine {
         #endif
         let existing = store.resources(forAsset: assetID)
 
-        for (resource, row) in resources {
+        var progress = progress
+        progress.files = resources.count
+        for (fileIndex, (resource, row)) in resources.enumerated() {
             if Task.isCancelled { return nil }
+            progress.report(file: fileIndex)
             let previous = existing[row.id]
             if previous?.state == .uploading { continue }
             // Originals never change, but an edited render keeps its name when re-edited, so it
@@ -217,8 +223,10 @@ actor BackupEngine {
             let file = Staging.url(for: stagedName)
             let sha256: String?
             do {
-                try await PhotoLibrary.export(resource, to: file)
-                sha256 = isEdit || inBucket != nil ? try Staging.sha256(of: file) : nil
+                // Written from here, not by Photos, so there's something to report as it goes.
+                let hashing = isEdit || inBucket != nil
+                try await PhotoLibrary.stream(resource, to: file, progress: progress.transfer(of: resource, file: fileIndex, share: hashing ? 0.8 : 1))
+                sha256 = hashing ? try Staging.sha256(of: file) { progress.report(file: fileIndex, fraction: 0.8 + 0.2 * $0) } : nil
             } catch {
                 Staging.remove(stagedName)
                 store.markFailed(row.id, error: "Couldn't read from photo library: \(error.localizedDescription)")
@@ -342,8 +350,8 @@ actor BackupEngine {
         Staging.removeOrphans(keeping: Set(store.uploadingResources().compactMap(\.stagedName)))
     }
 
-    private func showListing(_ phase: String) async {
-        ContinuedRunTask.listingStep(.bucket, phase: phase)
+    private func showListing(_ phase: String, found: Int) async {
+        ContinuedRunTask.update(.bucket, .listing, completed: found, of: nil)
         await report(phase: phase, running: true)
     }
 
