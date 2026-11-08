@@ -67,10 +67,20 @@ enum StorageInventory {
 
     // MARK: - Bucket
 
+    /// A listing of the bucket this recent is used as it is, since one background run backs up,
+    /// copies to the drive and syncs, and each would otherwise list the whole bucket. This app's
+    /// own uploads are recorded as they finish, so only files put there by something else are
+    /// missed for a while, and a bucket that refuses uploads to taken names won't let an upload
+    /// land on one. One that can't refuse them has only the listing, so it's always listed again.
+    private static let s3ListingFreshFor: TimeInterval = 10 * 60
+
     /// Brings the record of handled paths and the listing of the bucket up to date. `progress` is
     /// told how many objects have been listed so far.
     static func prepareS3(client: S3Client, prefix: String, session: URLSession,
                           progress: ((Int) async -> Void)? = nil) async throws {
+        let listedAt = store.meta(listedKey(client: client, prefix: prefix)).flatMap(Double.init) ?? 0
+        let isFresh = hasListedS3(client: client, prefix: prefix) && !lacksConditionalWrites(client: client, prefix: prefix)
+            && Date().timeIntervalSince1970 - listedAt < s3ListingFreshFor
         // What's been checked in one bucket says nothing about another.
         let current = identity(client: client, prefix: prefix)
         let previous = store.meta("current-bucket")
@@ -81,7 +91,7 @@ enum StorageInventory {
             store.setMeta("current-bucket", current)
         }
         try await mergeHandledPaths(fromS3: client, prefix: prefix, session: session)
-        try await refreshS3(client: client, prefix: prefix, session: session, progress: progress)
+        if !isFresh { try await refreshS3(client: client, prefix: prefix, session: session, progress: progress) }
     }
 
     private static func refreshS3(client: S3Client, prefix: String, session: URLSession,
@@ -93,7 +103,7 @@ enum StorageInventory {
             return LibraryPath.isLibraryContent(path) ? InventoryEntry(source: .s3, path: path, size: object.size) : nil
         }
         guard store.replaceInventory(source: .s3, entries: entries) else { throw Failure.couldNotSave }
-        store.setMeta(listedKey(client: client, prefix: prefix), "1")
+        store.setMeta(listedKey(client: client, prefix: prefix), String(Date().timeIntervalSince1970))
     }
 
     /// Whether uploads to this bucket can ask to be refused if a name is taken, the last guard
