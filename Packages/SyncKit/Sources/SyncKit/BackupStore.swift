@@ -42,21 +42,14 @@ public enum PathHolder: Sendable, Equatable {
 ///
 /// An asset is complete once every one of its resources has uploaded. Safe to call from any thread.
 public final class BackupStore: @unchecked Sendable {
-    private var db: OpaquePointer?
-    private let lock = NSLock()
+    private let db: SQLiteDatabase
     private var libraryLoaded = false
-    private var inTransaction = false
-    private var statementFailed = false
-    private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     /// `onLayoutChange` runs if opening this database moves it to a new layout, which everything
     /// is backed up again for.
     public init(path: String, onLayoutChange: () -> Void) {
-        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
-            fatalError("Could not open backup database at \(path)")
-        }
-        sqlite3_exec(db, """
-            PRAGMA journal_mode = WAL;
+        db = SQLiteDatabase(path: path)
+        db.executeScript("""
             CREATE TABLE IF NOT EXISTS assets (
                 id TEXT PRIMARY KEY,
                 completed_at REAL NOT NULL,
@@ -112,14 +105,18 @@ public final class BackupStore: @unchecked Sendable {
                 value TEXT NOT NULL
             );
             CREATE TEMP TABLE library (id TEXT PRIMARY KEY);
-            """, nil, nil, nil)
-        // Columns added after the first version; these fail harmlessly when already present.
-        sqlite3_exec(db, "ALTER TABLE assets ADD COLUMN modified_at REAL", nil, nil, nil)
-        sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN sha256 TEXT", nil, nil, nil)
-        sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN asset_modified_at REAL", nil, nil, nil)
-        sqlite3_exec(db, "ALTER TABLE handled_paths ADD COLUMN on_bucket INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
-        sqlite3_exec(db, "ALTER TABLE resources ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
-        migrateToLibraryLayout(onLayoutChange)
+            """)
+        // Columns added before versions were recorded, which some databases lack whatever their version.
+        do {
+            db.addColumn("modified_at", definition: "REAL", to: "assets")
+            db.addColumn("sha256", definition: "TEXT", to: "resources")
+            db.addColumn("asset_modified_at", definition: "REAL", to: "resources")
+            db.addColumn("on_bucket", definition: "INTEGER NOT NULL DEFAULT 0", to: "handled_paths")
+            db.addColumn("superseded", definition: "INTEGER NOT NULL DEFAULT 0", to: "resources")
+        }
+        db.migrate(to: 1) {
+            migrateToLibraryLayout(onLayoutChange)
+        }
         recordWhatIsInBucket()
         recordWhereUploadsGo()
     }
@@ -127,39 +124,31 @@ public final class BackupStore: @unchecked Sendable {
     /// The layout changed from `<year>/<month>/<asset-uuid>/<file>` to the picture library's, so
     /// everything is backed up again.
     private func migrateToLibraryLayout(_ onLayoutChange: () -> Void) {
-        guard userVersion < 1 else { return }
         execute("DELETE FROM resources")
         execute("DELETE FROM assets")
         execute("DELETE FROM drive_assets")
         onLayoutChange()
-        sqlite3_exec(db, "PRAGMA user_version = 1", nil, nil, nil)
     }
 
     /// Files already uploaded from this phone are known to be in the bucket.
     private func recordWhatIsInBucket() {
-        guard userVersion < 2 else { return }
-        execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id IN (SELECT id FROM resources WHERE state = ?)",
-                [ResourceState.done.rawValue])
-        sqlite3_exec(db, "PRAGMA user_version = 2", nil, nil, nil)
+        db.migrate(to: 2) {
+            execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id IN (SELECT id FROM resources WHERE state = ?)",
+                    [ResourceState.done.rawValue])
+        }
     }
 
     /// Each upload records the path and bucket it was sent to, so finishing it can only count for
     /// those. Uploads already going were sent to the path their file holds now.
     private func recordWhereUploadsGo() {
-        guard userVersion < 3 else { return }
-        _ = transaction {
-            execute("ALTER TABLE resources ADD COLUMN upload_path TEXT")
-            execute("ALTER TABLE resources ADD COLUMN upload_bucket TEXT")
+        db.migrate(to: 3) {
+            db.addColumn("upload_path", definition: "TEXT", to: "resources")
+            db.addColumn("upload_bucket", definition: "TEXT", to: "resources")
             execute("""
                 UPDATE resources SET upload_path = (SELECT path FROM handled_paths WHERE handled_paths.resource_id = resources.id)
                 WHERE state = ?
                 """, [ResourceState.uploading.rawValue])
-            execute("PRAGMA user_version = 3")
         }
-    }
-
-    private var userVersion: Int {
-        query("PRAGMA user_version") { Int(sqlite3_column_int($0, 0)) }.first ?? 0
     }
 
     // MARK: - Queries
@@ -474,7 +463,7 @@ public final class BackupStore: @unchecked Sendable {
             // Only the path: the drive pass works without the bucket pass's rows.
             guard holder(ofPath: path) == .resource(id) else { return false }
             execute("UPDATE handled_paths SET on_drive = 1 WHERE norm = ? AND on_drive = 0", [LibraryPath.normalized(path)])
-            if sqlite3_changes(db) > 0 { bumpHandledVersion() }
+            if db.changes > 0 { bumpHandledVersion() }
             return true
         }
     }
@@ -522,11 +511,11 @@ public final class BackupStore: @unchecked Sendable {
                     INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id, on_drive, on_bucket) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(norm) DO UPDATE SET on_drive = MAX(on_drive, excluded.on_drive), on_bucket = MAX(on_bucket, excluded.on_bucket)
                     """, rows: entries) { stmt, entry in
-                    sqlite3_bind_text(stmt, 1, LibraryPath.normalized(entry.path), -1, Self.transient)
-                    sqlite3_bind_text(stmt, 2, entry.path, -1, Self.transient)
-                    sqlite3_bind_text(stmt, 3, entry.kind.rawValue, -1, Self.transient)
-                    Self.bind(stmt, 4, entry.resourceID)
-                    Self.bind(stmt, 5, entry.resourceID.map(ResourceRow.assetID(ofResource:)))
+                    SQLiteDatabase.bind(stmt, 1, LibraryPath.normalized(entry.path))
+                    SQLiteDatabase.bind(stmt, 2, entry.path)
+                    SQLiteDatabase.bind(stmt, 3, entry.kind.rawValue)
+                    SQLiteDatabase.bind(stmt, 4, entry.resourceID)
+                    SQLiteDatabase.bind(stmt, 5, entry.resourceID.map(ResourceRow.assetID(ofResource:)))
                     sqlite3_bind_int(stmt, 6, source == .drive && entry.onDrive == true ? 1 : 0)
                     sqlite3_bind_int(stmt, 7, source == .s3 && entry.inBucket == true ? 1 : 0)
                 }
@@ -586,8 +575,8 @@ public final class BackupStore: @unchecked Sendable {
 
     private func insertInventory(source: StorageSource, entries: [InventoryEntry]) throws {
         try insert("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)", [source.rawValue], rows: entries) { stmt, entry in
-            sqlite3_bind_text(stmt, 2, LibraryPath.normalized(entry.path), -1, Self.transient)
-            sqlite3_bind_text(stmt, 3, entry.path, -1, Self.transient)
+            SQLiteDatabase.bind(stmt, 2, LibraryPath.normalized(entry.path))
+            SQLiteDatabase.bind(stmt, 3, entry.path)
             sqlite3_bind_int64(stmt, 4, entry.size)
         }
     }
@@ -663,8 +652,8 @@ public final class BackupStore: @unchecked Sendable {
             transaction {
                 execute("DELETE FROM imported_assets")
                 try insert("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", rows: assets) { stmt, asset in
-                    sqlite3_bind_text(stmt, 1, asset.assetID, -1, Self.transient)
-                    sqlite3_bind_text(stmt, 2, asset.tag, -1, Self.transient)
+                    SQLiteDatabase.bind(stmt, 1, asset.assetID)
+                    SQLiteDatabase.bind(stmt, 2, asset.tag)
                 }
             }
         }
@@ -708,7 +697,7 @@ public final class BackupStore: @unchecked Sendable {
             let saved = transaction {
                 execute("DELETE FROM library")
                 try insert("INSERT OR IGNORE INTO library (id) VALUES (?)", rows: ids) { stmt, id in
-                    sqlite3_bind_text(stmt, 1, id, -1, Self.transient)
+                    SQLiteDatabase.bind(stmt, 1, id)
                 }
             }
             if saved { libraryLoaded = true }
@@ -777,7 +766,7 @@ public final class BackupStore: @unchecked Sendable {
                 [ResourceState.done.rawValue, now, id])
         execute("UPDATE handled_paths SET on_bucket = 1 WHERE norm = ? AND resource_id = ? AND on_bucket = 0",
                 [LibraryPath.normalized(path), id])
-        if sqlite3_changes(db) > 0 { bumpHandledVersion() }
+        if db.changes > 0 { bumpHandledVersion() }
         completeAssetIfFinished(assetID)
         return true
     }
@@ -785,7 +774,7 @@ public final class BackupStore: @unchecked Sendable {
     /// Asset IDs mapped to the modification dates in the second column, which may be null.
     private func modifiedDates(_ sql: String, _ args: [Any?] = []) -> [String: Double?] {
         let rows = query(sql, args) { stmt -> (String, Double?) in
-            let modified = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 1)
+            let modified = SQLiteDatabase.double(stmt, 1)
             return (text(stmt, 0) ?? "", modified)
         }
         return Dictionary(rows, uniquingKeysWith: { $1 })
@@ -801,106 +790,25 @@ public final class BackupStore: @unchecked Sendable {
             """, [assetID, now, assetID])
     }
 
-    private func locked<T>(_ body: () throws -> T) rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return try body()
+    private func locked<T>(_ body: () throws -> T) rethrows -> T { try db.locked(body) }
+
+    private func transaction(_ body: () throws -> Void) -> Bool { db.transaction(body) }
+
+    private func execute(_ sql: String, _ args: [Any?] = []) { db.execute(sql, args) }
+
+    private func query<T>(_ sql: String, _ args: [Any?] = [], _ row: (OpaquePointer) -> T) -> [T] { db.query(sql, args, row) }
+
+    private func insert<Row>(_ sql: String, _ args: [Any?] = [], rows: [Row], bind: (OpaquePointer, Row) -> Void) throws {
+        try db.insert(sql, args, rows: rows, bind: bind)
     }
 
-    /// All or nothing: if a statement fails or `body` throws, the rest is skipped and things are
-    /// left as they were. Returns whether it was saved.
-    private func transaction(_ body: () throws -> Void) -> Bool {
-        inTransaction = true
-        defer {
-            inTransaction = false
-            statementFailed = false
-        }
-        execute("BEGIN")
-        guard !statementFailed else { return false }
-        do {
-            try body()
-            execute("COMMIT")
-        } catch {
-            print("SQLite transaction failed: \(error)")
-            statementFailed = true
-        }
-        guard statementFailed else { return true }
-        statementFailed = false
-        inTransaction = false
-        execute("ROLLBACK")
-        return false
-    }
+    private func text(_ stmt: OpaquePointer, _ column: Int32) -> String? { SQLiteDatabase.text(stmt, column) }
 
     /// A transaction that changes the handled paths.
     private func handledTransaction(_ body: () throws -> Void) -> Bool {
         let saved = transaction(body)
         if saved { bumpHandledVersion() }
         return saved
-    }
-
-    private struct StatementFailure: Error {
-        let message: String
-    }
-
-    /// Runs one statement for each row, stopping at the first failure.
-    private func insert<Row>(_ sql: String, _ args: [Any?] = [], rows: [Row], bind: (OpaquePointer, Row) -> Void) throws {
-        guard !statementFailed else { return }
-        guard let stmt = prepare(sql, args) else { throw StatementFailure(message: "Couldn't prepare \(sql)") }
-        defer { sqlite3_finalize(stmt) }
-        for row in rows {
-            bind(stmt, row)
-            guard sqlite3_step(stmt) == SQLITE_DONE else {
-                throw StatementFailure(message: "\(String(cString: sqlite3_errmsg(db))) — \(sql)")
-            }
-            sqlite3_reset(stmt)
-        }
-    }
-
-    private static func bind(_ stmt: OpaquePointer, _ index: Int32, _ text: String?) {
-        if let text { sqlite3_bind_text(stmt, index, text, -1, transient) } else { sqlite3_bind_null(stmt, index) }
-    }
-
-    private func prepare(_ sql: String, _ args: [Any?]) -> OpaquePointer? {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            print("SQLite prepare failed: \(String(cString: sqlite3_errmsg(db))) — \(sql)")
-            return nil
-        }
-        for (i, arg) in args.enumerated() {
-            let index = Int32(i + 1)
-            switch arg {
-            case let v as String: sqlite3_bind_text(stmt, index, v, -1, Self.transient)
-            case let v as Int: sqlite3_bind_int64(stmt, index, Int64(v))
-            case let v as Double: sqlite3_bind_double(stmt, index, v)
-            default: sqlite3_bind_null(stmt, index)
-            }
-        }
-        return stmt
-    }
-
-    private func execute(_ sql: String, _ args: [Any?] = []) {
-        guard !statementFailed else { return }
-        guard let stmt = prepare(sql, args) else {
-            statementFailed = inTransaction
-            return
-        }
-        defer { sqlite3_finalize(stmt) }
-        if sqlite3_step(stmt) != SQLITE_DONE {
-            print("SQLite step failed: \(String(cString: sqlite3_errmsg(db))) — \(sql)")
-            statementFailed = inTransaction
-        }
-    }
-
-    private func query<T>(_ sql: String, _ args: [Any?] = [], _ row: (OpaquePointer) -> T) -> [T] {
-        guard let stmt = prepare(sql, args) else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        var results: [T] = []
-        while sqlite3_step(stmt) == SQLITE_ROW { results.append(row(stmt)) }
-        return results
-    }
-
-    private func text(_ stmt: OpaquePointer, _ column: Int32) -> String? {
-        sqlite3_column_text(stmt, column).map { String(cString: $0) }
     }
 }
 
