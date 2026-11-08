@@ -452,13 +452,17 @@ public final class BackupStore: @unchecked Sendable {
         guard !entries.isEmpty else { return true }
         return locked {
             handledTransaction {
-                for entry in entries {
-                    let assetID = entry.resourceID.map(ResourceRow.assetID(ofResource:))
-                    execute("""
-                        INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id, on_drive, on_bucket) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(norm) DO UPDATE SET on_drive = MAX(on_drive, excluded.on_drive), on_bucket = MAX(on_bucket, excluded.on_bucket)
-                        """, [LibraryPath.normalized(entry.path), entry.path, entry.kind.rawValue, entry.resourceID, assetID,
-                              source == .drive && entry.onDrive == true ? 1 : 0, source == .s3 && entry.inBucket == true ? 1 : 0])
+                try insert("""
+                    INSERT INTO handled_paths (norm, path, kind, resource_id, asset_id, on_drive, on_bucket) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(norm) DO UPDATE SET on_drive = MAX(on_drive, excluded.on_drive), on_bucket = MAX(on_bucket, excluded.on_bucket)
+                    """, rows: entries) { stmt, entry in
+                    sqlite3_bind_text(stmt, 1, LibraryPath.normalized(entry.path), -1, Self.transient)
+                    sqlite3_bind_text(stmt, 2, entry.path, -1, Self.transient)
+                    sqlite3_bind_text(stmt, 3, entry.kind.rawValue, -1, Self.transient)
+                    Self.bind(stmt, 4, entry.resourceID)
+                    Self.bind(stmt, 5, entry.resourceID.map(ResourceRow.assetID(ofResource:)))
+                    sqlite3_bind_int(stmt, 6, source == .drive && entry.onDrive == true ? 1 : 0)
+                    sqlite3_bind_int(stmt, 7, source == .s3 && entry.inBucket == true ? 1 : 0)
                 }
             }
         }
@@ -486,15 +490,10 @@ public final class BackupStore: @unchecked Sendable {
 
     /// Returns false, keeping the previous listing, if it couldn't be saved.
     public func replaceInventory(source: StorageSource, entries: [InventoryEntry]) -> Bool {
-        let rows = entries.map { (norm: LibraryPath.normalized($0.path), path: $0.path, size: $0.size) }
-        return locked {
+        locked {
             transaction {
                 execute("DELETE FROM remote_files WHERE source = ?", [source.rawValue])
-                try insert("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)", [source.rawValue], rows: rows) { stmt, row in
-                    sqlite3_bind_text(stmt, 2, row.norm, -1, Self.transient)
-                    sqlite3_bind_text(stmt, 3, row.path, -1, Self.transient)
-                    sqlite3_bind_int64(stmt, 4, row.size)
-                }
+                try insertInventory(source: source, entries: entries)
             }
         }
     }
@@ -503,16 +502,19 @@ public final class BackupStore: @unchecked Sendable {
     /// listing over, forgetting the files directly in it ("" is the top). Returns false, changing
     /// nothing, if it couldn't be saved.
     public func addInventory(source: StorageSource, entries: [InventoryEntry], replacingFolder folder: String? = nil) -> Bool {
-        let rows = entries.map { (norm: LibraryPath.normalized($0.path), path: $0.path, size: $0.size) }
-        return locked {
+        locked {
             transaction {
                 if let folder { deleteInventory(source: source, folder: LibraryPath.normalized(folder)) }
-                try insert("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)", [source.rawValue], rows: rows) { stmt, row in
-                    sqlite3_bind_text(stmt, 2, row.norm, -1, Self.transient)
-                    sqlite3_bind_text(stmt, 3, row.path, -1, Self.transient)
-                    sqlite3_bind_int64(stmt, 4, row.size)
-                }
+                try insertInventory(source: source, entries: entries)
             }
+        }
+    }
+
+    private func insertInventory(source: StorageSource, entries: [InventoryEntry]) throws {
+        try insert("INSERT OR REPLACE INTO remote_files (source, norm, path, size) VALUES (?, ?, ?, ?)", [source.rawValue], rows: entries) { stmt, entry in
+            sqlite3_bind_text(stmt, 2, LibraryPath.normalized(entry.path), -1, Self.transient)
+            sqlite3_bind_text(stmt, 3, entry.path, -1, Self.transient)
+            sqlite3_bind_int64(stmt, 4, entry.size)
         }
     }
 
@@ -586,8 +588,9 @@ public final class BackupStore: @unchecked Sendable {
         locked {
             transaction {
                 execute("DELETE FROM imported_assets")
-                for asset in assets {
-                    execute("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", [asset.assetID, asset.tag])
+                try insert("INSERT OR REPLACE INTO imported_assets (asset_id, tag) VALUES (?, ?)", rows: assets) { stmt, asset in
+                    sqlite3_bind_text(stmt, 1, asset.assetID, -1, Self.transient)
+                    sqlite3_bind_text(stmt, 2, asset.tag, -1, Self.transient)
                 }
             }
         }
@@ -754,6 +757,10 @@ public final class BackupStore: @unchecked Sendable {
             }
             sqlite3_reset(stmt)
         }
+    }
+
+    private static func bind(_ stmt: OpaquePointer, _ index: Int32, _ text: String?) {
+        if let text { sqlite3_bind_text(stmt, index, text, -1, transient) } else { sqlite3_bind_null(stmt, index) }
     }
 
     private func prepare(_ sql: String, _ args: [Any?]) -> OpaquePointer? {
