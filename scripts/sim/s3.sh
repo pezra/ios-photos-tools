@@ -1,6 +1,7 @@
 #!/bin/bash
 # Runs the local S3 service (Moto in Docker), with versioned buckets pt-a and pt-b.
 #   s3.sh up                     start it and create the buckets (its data goes when it stops)
+#   s3.sh mb NAME                make another versioned bucket
 #   s3.sh down                   stop it
 #   s3.sh ls BUCKET              list object keys and sizes
 #   s3.sh versions BUCKET        list every version of every object
@@ -15,7 +16,17 @@ auth=(-H "Authorization: AWS4-HMAC-SHA256 Credential=$S3_KEY/20260101/us-east-1/
 # A key as it goes in a URL: spaces and the like escaped, slashes kept.
 encode() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$1"; }
 
+make_bucket() {
+    curl -sf -o /dev/null "${auth[@]}" -X PUT "$S3_URL/$1"
+    curl -sf -o /dev/null "${auth[@]}" -X PUT "$S3_URL/$1?versioning=" -H "Content-Type: application/xml" \
+        --data-binary '<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>'
+}
+
 case "${1:-}" in
+mb)
+    [[ -n "${2:-}" ]] || { echo "usage: s3.sh mb NAME" >&2; exit 2; }
+    make_bucket "$2" && echo "Made versioned bucket $2."
+    ;;
 up)
     if ! docker ps --format '{{.Names}}' | grep -qx "$S3_CONTAINER"; then
         docker run -d --rm --name "$S3_CONTAINER" -p "$S3_PORT:5000" "$S3_IMAGE" >/dev/null
@@ -24,11 +35,7 @@ up)
         curl -s -o /dev/null "$S3_URL" && break
         sleep 1
     done
-    for bucket in pt-a pt-b; do
-        curl -sf -o /dev/null "${auth[@]}" -X PUT "$S3_URL/$bucket"
-        curl -sf -o /dev/null "${auth[@]}" -X PUT "$S3_URL/$bucket?versioning=" -H "Content-Type: application/xml" \
-            --data-binary '<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>'
-    done
+    for bucket in pt-a pt-b; do make_bucket "$bucket"; done
     echo "S3 at $S3_URL with versioned buckets pt-a and pt-b."
     ;;
 down)
@@ -58,7 +65,7 @@ rm)
     curl -sf -o /dev/null "${auth[@]}" -X DELETE "$S3_URL/$2/$(encode "$3")" && echo "Deleted $3"
     ;;
 *)
-    echo "usage: s3.sh up|down|ls BUCKET|versions BUCKET|put BUCKET KEY FILE|rm BUCKET KEY" >&2
+    echo "usage: s3.sh up|mb NAME|down|ls BUCKET|versions BUCKET|put BUCKET KEY FILE|rm BUCKET KEY" >&2
     exit 2
     ;;
 esac
