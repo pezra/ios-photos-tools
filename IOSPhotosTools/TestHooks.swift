@@ -22,6 +22,9 @@ import SyncKit
 ///   `resume` seconds later. Several can be given, separated by semicolons.
 /// - `PT_TEST_TAP`: `row,after`. Taps that row's start button `after` seconds after launch.
 ///   Several can be given, separated by semicolons.
+/// - `PT_TEST_WATCHDOG`: any value. A timer on the main thread logs each time it fires more than
+///   100 ms late, and a total every 10 seconds, as a stand-in for Instruments' hangs report (which
+///   the simulator can't record). Category `background`, messages starting "Watchdog".
 /// - `PT_TEST_PAUSE_DRIVE_IN_SYNC`: any value. Pauses the drive when the sync pass first starts,
 ///   which leaves the sync running.
 enum TestHooks {
@@ -74,6 +77,9 @@ enum TestHooks {
         if let name = environment["PT_TEST_DRIVE"] {
             applyDrive(name)
         }
+        if environment["PT_TEST_WATCHDOG"] != nil {
+            watchMainThread()
+        }
         if let spec = environment["PT_TEST_PAUSE"] {
             for part in spec.split(separator: ";") { pauseAndResume(String(part)) }
         }
@@ -82,6 +88,33 @@ enum TestHooks {
         }
         if let count = environment["PT_TEST_EDIT"].flatMap(Int.init) {
             Task.detached { await editPhotos(count) }
+        }
+    }
+
+    private static func watchMainThread() {
+        Task { @MainActor in
+            let start = ContinuousClock.now
+            var last = start
+            var hangs = 0
+            var worst = 0.0
+            var total = 0.0
+            var reported = start
+            while true {
+                try? await Task.sleep(for: .milliseconds(10))
+                let now = ContinuousClock.now
+                let late = (now - last - .milliseconds(10)) / .milliseconds(1)
+                last = now
+                if late > 100 {
+                    hangs += 1
+                    worst = max(worst, late)
+                    total += late
+                    Log.background.info("Watchdog: main thread late by \(Int(late)) ms")
+                }
+                if now - reported >= .seconds(10) {
+                    reported = now
+                    Log.background.info("Watchdog: \((now - start) / .seconds(1)) s, \(hangs) hangs over 100 ms, worst \(Int(worst)) ms, total \(Int(total)) ms")
+                }
+            }
         }
     }
 
