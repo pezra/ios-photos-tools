@@ -103,23 +103,38 @@ final class TripsModel {
         }
     }
 
-    /// Pairs newly detected trips with the ones already known, by overlapping dates.
+    /// Pairs newly detected trips with the ones already known, by overlapping dates. Where a trip
+    /// overlaps several (two that merged, say), it takes the one with an album, then the one it
+    /// overlaps most, so the choice doesn't depend on the order they're stored in.
     private func match(_ found: [DetectedTrip]) {
+        // Changed as a copy and saved once.
+        var updated = stored
         var claimed = Set<UUID>()
         var detected: [UUID: DetectedTrip] = [:]
         for trip in found {
-            let known = stored.values.first { !claimed.contains($0.id) && $0.start <= trip.end && trip.start <= $0.end }
+            func overlap(_ known: StoredTrip) -> TimeInterval {
+                min(known.end, trip.end).timeIntervalSince(max(known.start, trip.start))
+            }
+            let known = updated.values
+                .filter { !claimed.contains($0.id) && $0.start <= trip.end && trip.start <= $0.end }
+                .min { a, b in
+                    if (a.albumID != nil) != (b.albumID != nil) { return a.albumID != nil }
+                    if overlap(a) != overlap(b) { return overlap(a) > overlap(b) }
+                    if a.start != b.start { return a.start < b.start }
+                    return a.id.uuidString < b.id.uuidString
+                }
             var saved = known ?? StoredTrip(start: trip.start, end: trip.end)
             saved.start = trip.start
             saved.end = trip.end
-            stored[saved.id] = saved
+            updated[saved.id] = saved
             claimed.insert(saved.id)
             detected[saved.id] = trip
         }
         // Forget trips that are gone (their photos were deleted, say) unless they have an album.
-        for id in stored.keys where !claimed.contains(id) && stored[id]?.albumID == nil {
-            stored[id] = nil
+        for id in updated.keys where !claimed.contains(id) && updated[id]?.albumID == nil {
+            updated[id] = nil
         }
+        stored = updated
         self.detected = detected
         order = detected.keys.sorted { detected[$0]!.start > detected[$1]!.start }
         publish()
