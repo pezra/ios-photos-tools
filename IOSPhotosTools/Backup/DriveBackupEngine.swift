@@ -144,7 +144,7 @@ actor DriveBackupEngine {
             setProgress(index, of: pending.count)
             await report(phase: "Copying \(index + 1) of \(pending.count)", running: true)
             let error = await copy(asset, to: root, driveID: driveID)
-            StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: false)
+            await StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: false)
             guard let error else { continue }
             if (try? root.checkResourceIsReachable()) != true {
                 disconnected = true
@@ -155,7 +155,7 @@ actor DriveBackupEngine {
         }
         setProgress(pending.count, of: pending.count)
         if !disconnected {
-            StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: true)
+            await StorageInventory.writeHandledPaths(toDrive: root, driveID: driveID, force: true)
         }
 
         let phase = disconnected ? "Drive disconnected"

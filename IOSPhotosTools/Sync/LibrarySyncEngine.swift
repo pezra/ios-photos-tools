@@ -238,7 +238,7 @@ actor LibrarySyncEngine {
 
     private func writeHandledPaths(_ sources: Sources, force: Bool) async {
         if let drive = sources.drive {
-            StorageInventory.writeHandledPaths(toDrive: drive.root, driveID: drive.id, force: force)
+            await StorageInventory.writeHandledPaths(toDrive: drive.root, driveID: drive.id, force: force)
         }
         if let bucket = sources.bucket {
             await StorageInventory.writeHandledPaths(toS3: bucket.client, prefix: bucket.prefix, force: force, session: bucket.session)

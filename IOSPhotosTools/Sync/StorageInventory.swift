@@ -46,21 +46,23 @@ enum StorageInventory {
 
     /// Writes the record to the drive if it's out of date. `force` writes any change at all;
     /// otherwise this waits until enough have built up.
-    static func writeHandledPaths(toDrive root: URL, driveID: String, force: Bool) {
+    static func writeHandledPaths(toDrive root: URL, driveID: String, force: Bool) async {
         guard store.meta("merged-drive-\(driveID)") != nil else { return }
-        let key = "written-drive-\(driveID)"
-        guard isDue(key: key, force: force) else { return }
-        let version = store.handledVersion
         let file = root.appending(path: HandledPathsFile.relativePath)
         let partial = file.deletingLastPathComponent().appending(path: ".\(file.lastPathComponent).partial")
         do {
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try HandledPathsFile.encode(store.handledEntries()).write(to: partial)
-            guard rename(partial.path, file.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            store.setMeta(key, String(version))
-            Log.handledPaths.info("Wrote handled paths to the drive at version \(version)")
+            let version = try await writer("written-drive-\(driveID)").write(force: force, interval: writeInterval) { data in
+                do {
+                    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try data.write(to: partial)
+                    guard rename(partial.path, file.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                } catch {
+                    try? FileManager.default.removeItem(at: partial)
+                    throw error
+                }
+            }
+            if let version { Log.handledPaths.info("Wrote handled paths to the drive at version \(version)") }
         } catch {
-            try? FileManager.default.removeItem(at: partial)
             Log.handledPaths.error("Couldn't write handled paths to the drive: \(error)")
         }
     }
@@ -180,14 +182,12 @@ enum StorageInventory {
     static func writeHandledPaths(toS3 client: S3Client, prefix: String, force: Bool, session: URLSession) async {
         let id = identity(client: client, prefix: prefix)
         guard store.meta("merged-s3-\(id)") != nil else { return }
-        let key = "written-s3-\(id)"
-        guard isDue(key: key, force: force) else { return }
-        let version = store.handledVersion
+        let key = handledKey(prefix: prefix)
         do {
-            try await client.putObject(key: handledKey(prefix: prefix), data: HandledPathsFile.encode(store.handledEntries()),
-                                       contentType: "application/x-ndjson", session: session)
-            store.setMeta(key, String(version))
-            Log.handledPaths.info("Wrote handled paths to the bucket at version \(version)")
+            let version = try await writer("written-s3-\(id)").write(force: force, interval: writeInterval) { data in
+                try await client.putObject(key: key, data: data, contentType: "application/x-ndjson", session: session)
+            }
+            if let version { Log.handledPaths.info("Wrote handled paths to the bucket at version \(version)") }
         } catch {
             Log.handledPaths.error("Couldn't write handled paths to the bucket: \(error)")
         }
@@ -195,10 +195,9 @@ enum StorageInventory {
 
     // MARK: - Helpers
 
-    private static func isDue(key: String, force: Bool) -> Bool {
-        let written = Int(store.meta(key) ?? "") ?? -1
-        let current = store.handledVersion
-        return force ? written != current : current - written >= writeInterval
+    /// Each place has one writer, whichever pass is writing to it. `key` records what was written.
+    private static func writer(_ key: String) -> HandledPathsWriter {
+        HandledPathsWriter.shared(store: store, key: key)
     }
 
     private static func handledKey(prefix: String) -> String {

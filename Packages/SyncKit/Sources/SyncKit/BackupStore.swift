@@ -493,16 +493,18 @@ public final class BackupStore: @unchecked Sendable {
     }
 
     public func handledEntries() -> [HandledPath] {
-        locked {
-            query("SELECT path, kind, resource_id, on_drive, on_bucket FROM handled_paths") { stmt in
-                HandledPath(
-                    path: text(stmt, 0) ?? "",
-                    kind: HandledPath.Kind(rawValue: text(stmt, 1) ?? "") ?? .backup,
-                    resourceID: text(stmt, 2),
-                    onDrive: sqlite3_column_int(stmt, 3) != 0 ? true : nil,
-                    inBucket: sqlite3_column_int(stmt, 4) != 0 ? true : nil
-                )
-            }
+        locked { handledRows() }
+    }
+
+    private func handledRows() -> [HandledPath] {
+        query("SELECT path, kind, resource_id, on_drive, on_bucket FROM handled_paths") { stmt in
+            HandledPath(
+                path: text(stmt, 0) ?? "",
+                kind: HandledPath.Kind(rawValue: text(stmt, 1) ?? "") ?? .backup,
+                resourceID: text(stmt, 2),
+                onDrive: sqlite3_column_int(stmt, 3) != 0 ? true : nil,
+                inBucket: sqlite3_column_int(stmt, 4) != 0 ? true : nil
+            )
         }
     }
 
@@ -526,6 +528,14 @@ public final class BackupStore: @unchecked Sendable {
                     sqlite3_bind_int(stmt, 7, source == .s3 && entry.inBucket == true ? 1 : 0)
                 }
             }
+        }
+    }
+
+    /// The handled paths with the version they're at, read together.
+    public func handledSnapshot() -> (version: Int, entries: [HandledPath]) {
+        locked {
+            let version = query("SELECT value FROM meta WHERE key = 'handled_version'") { Int(text($0, 0) ?? "") ?? 0 }.first ?? 0
+            return (version, handledRows())
         }
     }
 
