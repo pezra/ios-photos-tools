@@ -65,8 +65,13 @@ final class CleanupModel {
 
     func toggle(_ assetID: String) {
         let keep = marked.contains(assetID)
-        if keep { marked.remove(assetID) } else { marked.insert(assetID) }
-        if keep { kept.insert(assetID) } else { kept.remove(assetID) }
+        if keep {
+            marked.remove(assetID)
+            kept.insert(assetID)
+        } else {
+            marked.insert(assetID)
+            kept.remove(assetID)
+        }
         AnalysisStore.shared.setKept(assetID, keep)
     }
 

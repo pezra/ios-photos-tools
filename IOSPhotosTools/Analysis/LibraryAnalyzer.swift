@@ -19,20 +19,19 @@ enum LibraryAnalyzer {
     static func analyze(_ assets: [PHAsset], onResult: (String, Result<PhotoAnalysis, Error>) -> Void) async {
         await withTaskGroup(of: (String, Result<PhotoAnalysis, Error>).self) { group in
             var queue = assets.makeIterator()
-            func addNext() -> Bool {
-                guard !Task.isCancelled, let asset = queue.next() else { return false }
+            func addNext() {
+                guard !Task.isCancelled, let asset = queue.next() else { return }
                 group.addTask {
                     do { return (asset.localIdentifier, .success(try await PhotoAnalyzer.analyze(asset))) }
                     catch { return (asset.localIdentifier, .failure(error)) }
                 }
-                return true
             }
-            for _ in 0..<concurrency { _ = addNext() }
+            for _ in 0..<concurrency { addNext() }
 
             while let (id, result) = await group.next() {
                 if case .success(let analysis) = result { AnalysisStore.shared.save(analysis) }
                 onResult(id, result)
-                _ = addNext()
+                addNext()
             }
         }
     }
