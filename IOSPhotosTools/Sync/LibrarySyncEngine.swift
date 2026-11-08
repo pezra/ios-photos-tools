@@ -92,6 +92,9 @@ actor LibrarySyncEngine {
         }
 
         await report(phase: "Checking storage…", running: true, startingPass: true)
+        #if DEBUG
+        TestHooks.syncStarted(afterDrive: progressHandler != nil)
+        #endif
         let reachedS3: Bool
         do {
             reachedS3 = try await prepareInventory(sources)

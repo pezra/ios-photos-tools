@@ -19,6 +19,8 @@ import Photos
 /// - `PT_TEST_PAUSE`: `row,after,resume` where row is `bucket`, `drive` or `sync`, and both times are
 ///   seconds. Taps that row's pause button `after` seconds after launch and its resume button
 ///   `resume` seconds later. Several can be given, separated by semicolons.
+/// - `PT_TEST_PAUSE_DRIVE_IN_SYNC`: any value. Pauses the drive when the sync pass first starts,
+///   which stops the sync if the drive's pass is waiting on it.
 enum TestHooks {
     private struct Settings: Decodable {
         var endpoint: String?
@@ -48,6 +50,16 @@ enum TestHooks {
         guard count == forgetAfter else { return }
         Log.background.info("Test hook: forgetting backup history after \(count) photos")
         Task { await BackupEngine.shared.forgetHistory() }
+    }
+
+    nonisolated(unsafe) private static var pausedInSync = false
+
+    /// Called when the sync pass starts.
+    static func syncStarted(afterDrive: Bool) {
+        guard afterDrive, ProcessInfo.processInfo.environment["PT_TEST_PAUSE_DRIVE_IN_SYNC"] != nil, !pausedInSync else { return }
+        pausedInSync = true
+        Log.background.info("Test hook: pausing drive during its sync step")
+        DriveBackupEngine.stop()
     }
 
     /// Must run before the app's `SettingsStore` is made, so it reads what's saved here.
