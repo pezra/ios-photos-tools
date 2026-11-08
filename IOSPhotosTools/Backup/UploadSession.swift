@@ -7,10 +7,15 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
     static let identifier = "org.barelyenough.ios-photos-tools.uploads"
     static let shared = UploadSession()
 
+    /// Sent after each change to an upload's state in the store. Listeners read the store for what.
+    let changes = ChangeSignal()
+
     private(set) var session: URLSession!
     private let lock = NSLock()
     private var responseBodies: [Int: Data] = [:]
     private var completionHandler: (() -> Void)?
+    /// Refused uploads whose key is being looked at. They still count as uploading.
+    private var checking: Set<String> = []
 
     /// Set when iOS relaunches the app to deliver upload events; called once they've been handled.
     var backgroundCompletionHandler: (() -> Void)? {
@@ -43,6 +48,13 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
         task.taskDescription = resourceID
         task.resume()
         Log.upload.info("Upload queued: \(resourceID, privacy: .public), conditional: \(mustNotExist)")
+        changes.send()
+    }
+
+    /// The resources whose uploads are still going, here or in a check after a refusal.
+    func inFlight() async -> Set<String> {
+        let tasks = await session.allTasks.compactMap(\.taskDescription)
+        return lock.withLock { checking.union(tasks) }
     }
 
     // MARK: - URLSessionDataDelegate
@@ -73,14 +85,24 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
         } else if (200..<300).contains(status) {
             store.markDone(resourceID)
         } else if status == 412 {
-            // Something's already there. The next pass compares it: the same photo (an earlier
-            // upload whose response was lost) is adopted, and anything else gets a new name.
-            store.retirePaths(forResource: resourceID)
+            // Something's already there. It's looked at, so the next pass compares it: the same
+            // photo (an earlier upload whose response was lost) is adopted, and anything else gets
+            // a new name. It counts as uploading until then.
+            lock.withLock { _ = checking.insert(resourceID) }
+            Task {
+                await StorageInventory.uploadRefused(resourceID)
+                lock.withLock { _ = checking.remove(resourceID) }
+                Staging.remove(stagedName)
+                changes.send()
+                await MainActor.run { BackupStatus.shared.refreshCounts() }
+            }
+            return
         } else {
             if status == 501 { StorageInventory.recheckConditionalWrites(afterUploadOf: resourceID) }
             store.markFailed(resourceID, error: S3Error.from(status: status, body: body).localizedDescription)
         }
         Staging.remove(stagedName)
+        changes.send()
 
         Task { @MainActor in BackupStatus.shared.refreshCounts() }
     }

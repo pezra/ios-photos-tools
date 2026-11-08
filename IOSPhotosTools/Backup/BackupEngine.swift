@@ -2,23 +2,28 @@ import Foundation
 import Photos
 import S3Kit
 import SyncKit
+import UIKit
 
 /// Finds assets that haven't been backed up, exports their files and hands them to the
 /// background upload session.
 actor BackupEngine {
     static let shared = BackupEngine()
 
-    /// How many files may be exported and waiting to upload at once. Bounds disk usage.
-    private let maxInFlight = 8
     /// Presigned URLs (rather than header signatures, which expire after ~15 minutes) let the
     /// system start a queued upload whenever it likes.
     private let urlLifetime = 7 * 24 * 60 * 60
-    /// How long a pass waits for uploads when none has finished. They carry on in the background
-    /// session either way, but some can be held back indefinitely, such as ones waiting for Wi-Fi.
-    private let uploadStallLimit: Duration = .seconds(120)
+    /// How long staging waits for an upload slot when no upload has finished. They carry on in the
+    /// background session either way, but some can be held back indefinitely, such as ones waiting
+    /// for Wi-Fi, so the pass ends and the rest is staged once they've finished.
+    private let slotStallLimit: Duration = .seconds(120)
 
     private let store = BackupStore.shared
     private let runner = PassRunner()
+    /// Whether, once the uploads going now have finished, a pass is to stage what the last one
+    /// left: refused names, files to send again, or photos there wasn't room for. Not after a pause.
+    private var resumeOnSettle = false
+    /// Whether the last pass stopped staging for want of room.
+    private var leftPhotos = false
 
     nonisolated static func start() {
         Task { await shared.startPass() }
@@ -28,6 +33,16 @@ actor BackupEngine {
         Task { await shared.cancel() }
     }
 
+    /// Listens for the uploads settling, for as long as the app runs. Call once, at launch.
+    nonisolated static func watchUploads() {
+        Task.detached(priority: .utility) {
+            let tracker = SettleTracker(signal: UploadSession.shared.changes) { BackupStore.shared.count(.uploading) }
+            while await tracker.nextSettle() {
+                await shared.uploadsSettled()
+            }
+        }
+    }
+
     /// Runs a pass (or joins the one in progress) and waits for it to finish. Cancelling the caller
     /// stops the pass.
     func run() async {
@@ -35,6 +50,7 @@ actor BackupEngine {
     }
 
     func cancel() {
+        resumeOnSettle = false
         runner.cancel()
     }
 
@@ -59,8 +75,8 @@ actor BackupEngine {
         if !cancelled { LibrarySyncEngine.start() }
     }
 
-    /// `isRetry` is for the one extra pass given to uploads that have to be sent again.
-    private func performPass(isRetry: Bool = false) async {
+    private func performPass() async {
+        resumeOnSettle = false
         guard let settings = SettingsStore.snapshot() else {
             await report(phase: "Storage not configured", running: false)
             return
@@ -80,7 +96,7 @@ actor BackupEngine {
         let session = settings.bucketSession()
         defer { session.finishTasksAndInvalidate() }
 
-        await report(phase: "Checking library…", running: true, startingPass: !isRetry)
+        await report(phase: "Checking library…", running: true, startingPass: true)
         // Before finding what's pending, since a new bucket has nothing in it yet.
         do {
             try StorageInventory.noticeBucket(client: client, prefix: settings.prefix)
@@ -114,9 +130,13 @@ actor BackupEngine {
 
         var namingFailures = 0
         var namingError: String?
+        var stoppedEarly = false
         for (index, asset) in pending.enumerated() {
-            await waitForUploadSlot()
             if Task.isCancelled { break }
+            guard await roomToStage() else {
+                stoppedEarly = !Task.isCancelled
+                break
+            }
             await report(phase: "Preparing \(index + 1) of \(pending.count)", running: true)
             if let error = await stage(asset, client: client, settings: settings, conditionalWrites: conditionalWrites) {
                 namingFailures += 1
@@ -125,30 +145,16 @@ actor BackupEngine {
             await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: false, session: session)
         }
 
-        if !Task.isCancelled {
-            await report(phase: "Uploading…", running: true)
-            var uploading = store.count(.uploading)
-            var lastChange = ContinuousClock.now
-            while !Task.isCancelled && uploading > 0 && ContinuousClock.now - lastChange < uploadStallLimit {
-                try? await Task.sleep(for: .seconds(2))
-                let count = store.count(.uploading)
-                if count != uploading {
-                    uploading = count
-                    lastChange = .now
-                }
-            }
-            // Uploads the bucket turned away because of the name.
-            if !isRetry && store.count(.pending) > 0 {
-                return await performPass(isRetry: true)
-            }
-        }
+        // The pass ends once everything is staged. The uploads carry on in the background session.
         await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: true, session: session)
+        resumeOnSettle = !Task.isCancelled
+        leftPhotos = stoppedEarly
 
         let failed = store.count(.failed) + namingFailures
         let uploading = store.count(.uploading)
         let phase = Task.isCancelled ? "Paused"
             : failed > 0 ? "Finished with \(failed) failed files"
-            : uploading > 0 ? "\(uploading) files still uploading"
+            : uploading > 0 ? BackupStatus.waitingForUploads
             : "Up to date"
         await report(phase: phase, running: false, error: failed > 0 ? store.lastError() ?? namingError : nil, finished: !Task.isCancelled)
     }
@@ -270,20 +276,69 @@ actor BackupEngine {
         return nil
     }
 
-    private func waitForUploadSlot() async {
-        while !Task.isCancelled && store.count(.uploading) >= maxInFlight {
-            try? await Task.sleep(for: .seconds(1))
+    /// Whether there's room to stage another photo. In the foreground that's an upload slot, waited
+    /// for. Uploads started in the background are paced by iOS, so there it's up to a disk budget,
+    /// and the pass doesn't wait.
+    private func roomToStage() async -> Bool {
+        let background = await MainActor.run { UIApplication.shared.applicationState == .background }
+        let room = StagingBudget.room(background: background, uploading: store.count(.uploading),
+                                      stagedBytes: background ? Staging.size() : 0,
+                                      availableBytes: background ? Staging.availableBytes() : nil)
+        switch room {
+        case .room:
+            return true
+        case .full:
+            Log.upload.info("Staged as much as the background allows: the rest is left for later")
+            return false
+        case .waitForSlot:
+            let store = store
+            if await UploadSession.shared.changes.wait(until: { store.count(.uploading) < StagingBudget.foregroundSlots },
+                                                       stallLimit: slotStallLimit) {
+                return true
+            }
+            if !Task.isCancelled {
+                Log.upload.info("No upload finished in \(self.slotStallLimit, privacy: .public): the rest is staged once they have")
+            }
+            return false
+        }
+    }
+
+    /// The uploads have all finished. In the foreground, the handled paths are written if due, and a
+    /// pass stages what the last one left. Not in the background, where this may be iOS waking the
+    /// app briefly to deliver upload events: that's left for the next run.
+    private func uploadsSettled() async {
+        // A pass going now may still stage more, or have names refused while it runs, which no
+        // later settle would pick up if its own uploads have all finished by the time it ends.
+        await runner.join()
+        guard store.count(.uploading) == 0 else { return }
+        let active = await MainActor.run { UIApplication.shared.applicationState == .active }
+        guard active else {
+            Log.upload.info("Uploads settled in the background: the rest is left for the next run")
+            return
+        }
+        Log.upload.info("Uploads settled")
+        if let settings = SettingsStore.snapshot(), let client = try? S3Client(config: settings.s3) {
+            let session = settings.bucketSession()
+            await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: false, session: session)
+            session.finishTasksAndInvalidate()
+        }
+        if resumeOnSettle && (leftPhotos || store.count(.pending) > 0) {
+            Log.pass.info("Starting a pass for what the last one left")
+            startPass()
         }
     }
 
     /// Resets resources marked as uploading whose task no longer exists (e.g. the app was
     /// reinstalled or the system dropped the task), and cleans up stray staged files.
     private func reconcileWithUploadSession() async {
-        let liveTasks = Set(await UploadSession.shared.session.allTasks.compactMap(\.taskDescription))
-        for resource in store.uploadingResources() where !liveTasks.contains(resource.id) {
+        let inFlight = await UploadSession.shared.inFlight()
+        var reset = false
+        for resource in store.uploadingResources() where !inFlight.contains(resource.id) {
             Staging.remove(resource.stagedName)
             store.resetToPending(resource.id)
+            reset = true
         }
+        if reset { UploadSession.shared.changes.send() }
         Staging.removeOrphans(keeping: Set(store.uploadingResources().compactMap(\.stagedName)))
     }
 

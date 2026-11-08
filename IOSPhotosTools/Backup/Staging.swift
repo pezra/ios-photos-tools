@@ -39,6 +39,17 @@ enum Staging {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
+    /// How much is staged.
+    static func size() -> Int64 {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        return files.reduce(0) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+    }
+
+    /// Free space on the disk staged files go to, if it can be found.
+    static func availableBytes() -> Int64? {
+        try? directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
+    }
+
     /// Deletes staged files that no upload refers to any more.
     static func removeOrphans(keeping names: Set<String>) {
         let files = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []

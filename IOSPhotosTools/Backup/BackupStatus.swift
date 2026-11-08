@@ -8,6 +8,8 @@ import SyncKit
 @Observable
 final class BackupStatus {
     static let shared = BackupStatus()
+    /// The phase of a pass that ended with uploads still going. The row shows how many from the counts.
+    nonisolated static let waitingForUploads = "Waiting for uploads"
 
     private var pass = PassStatus(lastFinishedKey: "lastFinished")
     var isRunning: Bool { pass.isRunning }
@@ -61,6 +63,11 @@ final class BackupStatus {
         let store = BackupStore.shared
         uploading = store.count(.uploading)
         failed = store.count(.failed)
+        // A pass that ended with uploads going shows how they went once they've finished.
+        if !pass.isRunning && pass.phase == Self.waitingForUploads && uploading == 0 {
+            pass.report(phase: failed > 0 ? "Finished with \(failed) failed files" : "Up to date", running: false,
+                        error: failed > 0 ? store.lastError() : nil, finished: true)
+        }
         scheduleCoverageRefresh()
     }
 

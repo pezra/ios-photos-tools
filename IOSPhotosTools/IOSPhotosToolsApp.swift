@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // Reconnect to the background upload session so completions that happened while we were
         // suspended get delivered.
         UploadSession.shared.activate()
+        BackupEngine.watchUploads()
         return true
     }
 
@@ -60,6 +61,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         completionHandler: @escaping () -> Void
     ) {
         guard identifier == UploadSession.identifier else { return completionHandler() }
+        Log.background.info("Woken for upload events")
+        // Called as soon as the events are handled, which records them in the store and nothing
+        // more: no network writes, since iOS gives this little time.
         UploadSession.shared.backgroundCompletionHandler = completionHandler
         UploadSession.shared.activate()
     }
