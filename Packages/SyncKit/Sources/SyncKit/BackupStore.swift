@@ -287,9 +287,11 @@ public final class BackupStore: @unchecked Sendable {
     }
 
     /// Forgets files still waiting to upload whose photos have left the library (as listed by
-    /// `setLibraryAssets`), which would otherwise count as failed on every pass.
+    /// `setLibraryAssets`), which would otherwise count as failed on every pass. Does nothing until
+    /// the library has been listed in this process, since until then every photo looks gone.
     public func forgetResourcesOfMissingAssets() {
         locked {
+            guard libraryLoaded else { return }
             execute("DELETE FROM resources WHERE state IN (?, ?) AND asset_id NOT IN (SELECT id FROM library)",
                     [ResourceState.pending.rawValue, ResourceState.failed.rawValue])
         }

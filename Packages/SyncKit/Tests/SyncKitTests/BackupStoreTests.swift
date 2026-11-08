@@ -374,6 +374,22 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertEqual(store.count(.failed), 0)
     }
 
+    func testNothingIsForgottenBeforeTheLibraryIsListed() {
+        open()
+        add([row("p1", "here", "2026/p1.x")], asset: "here")
+        store.markFailed("p1", error: "boom")
+        add([row("p2", "here", "2026/p2.x")], asset: "here")
+        store.forgetResourcesOfMissingAssets()
+        XCTAssertEqual(state("here", "p1"), .failed)
+        XCTAssertEqual(state("here", "p2"), .pending)
+        open()
+        store.forgetResourcesOfMissingAssets()
+        XCTAssertEqual(state("here", "p1"), .failed, "nor after reopening")
+        store.setLibraryAssets(["here"])
+        store.forgetResourcesOfMissingAssets()
+        XCTAssertEqual(state("here", "p2"), .pending)
+    }
+
     // MARK: - Writes that fail
 
     /// Makes any write of a path or tag containing "boom" fail partway through a change.
