@@ -1,5 +1,6 @@
 import Observation
 import Photos
+import TripKit
 import UIKit
 
 /// Finds groups of near-duplicate photos and deletes the ones the user doesn't want to keep.
@@ -36,7 +37,7 @@ final class CleanupModel {
     }
 
     private var scan: Task<Void, Never>?
-    private var candidates: [Candidate] = []
+    private var candidates: [DuplicateCandidate] = []
     /// Near duplicates the user unmarked. They stay unmarked in every later scan.
     private var kept = AnalysisStore.shared.keptIDs()
 
@@ -155,7 +156,7 @@ final class CleanupModel {
         }
 
         candidates = assets.compactMap { asset in
-            analyses[asset.localIdentifier].map { Candidate(analysis: $0, asset: asset) }
+            analyses[asset.localIdentifier].map { DuplicateCandidate(analysis: $0, asset: asset) }
         }
         regroup()
 

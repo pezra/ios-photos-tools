@@ -1,47 +1,66 @@
 import Foundation
-import Photos
-import TripKit
 
-/// A photo to consider for grouping: its analysis plus library details that can change without
-/// the pixels changing.
-struct Candidate: Sendable {
-    let analysis: PhotoAnalysis
-    let createdAt: Date?
-    let isFavorite: Bool
-    let isEdited: Bool
-    let burstID: String?
+/// A photo to consider for grouping: what the analysis learned about it, plus library details
+/// that can change without the pixels changing.
+public struct DuplicateCandidate: Sendable {
+    public let id: String
+    public let createdAt: Date?
+    public let isFavorite: Bool
+    public let isEdited: Bool
+    public let burstID: String?
+    public let pixelWidth: Int
+    public let pixelHeight: Int
+    /// Difference hash of a small greyscale copy.
+    public let dHash: UInt64
+    /// Unit-length feature print.
+    public let featurePrint: [Float]
+    public let aesthetics: Float
+    public let faceQuality: Float?
+    public let sharpness: Double
 
-    var id: String { analysis.assetID }
-}
-
-extension Candidate {
-    init(analysis: PhotoAnalysis, asset: PHAsset) {
-        self.init(analysis: analysis, createdAt: asset.creationDate, isFavorite: asset.isFavorite,
-                  isEdited: asset.hasAdjustments, burstID: asset.burstIdentifier)
+    public init(id: String, createdAt: Date?, isFavorite: Bool, isEdited: Bool, burstID: String?,
+                pixelWidth: Int, pixelHeight: Int, dHash: UInt64, featurePrint: [Float],
+                aesthetics: Float, faceQuality: Float?, sharpness: Double) {
+        self.id = id
+        self.createdAt = createdAt
+        self.isFavorite = isFavorite
+        self.isEdited = isEdited
+        self.burstID = burstID
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.dHash = dHash
+        self.featurePrint = featurePrint
+        self.aesthetics = aesthetics
+        self.faceQuality = faceQuality
+        self.sharpness = sharpness
     }
 }
 
 /// Photos that look like the same shot, best first.
-struct DuplicateGroup: Identifiable, Sendable {
-    let assetIDs: [String]
+public struct DuplicateGroup: Identifiable, Sendable {
+    public let assetIDs: [String]
 
-    var id: String { assetIDs[0] }
-    var best: String { assetIDs[0] }
+    public init(assetIDs: [String]) { self.assetIDs = assetIDs }
+
+    public var id: String { assetIDs[0] }
+    public var best: String { assetIDs[0] }
 }
 
-enum DuplicateGrouper {
-    struct Options: Sendable {
+public enum DuplicateGrouper {
+    public struct Options: Sendable {
         /// Only photos taken within this many seconds of each other are compared (exact copies
         /// are found regardless).
-        var window: TimeInterval = 120
+        public var window: TimeInterval = 120
         /// Largest feature-print distance (0–2) still counted as the same shot.
-        var maxFeatureDistance: Float = 0.45
+        public var maxFeatureDistance: Float = 0.45
         /// Largest difference-hash distance (bits out of 64) counted as the same image.
-        var maxHashDistance = 4
+        public var maxHashDistance = 4
+
+        public init() {}
     }
 
     /// Groups of two or more near-identical photos, newest first, each ranked best first.
-    static func groups(_ candidates: [Candidate], options: Options = Options()) -> [DuplicateGroup] {
+    public static func groups(_ candidates: [DuplicateCandidate], options: Options = Options()) -> [DuplicateGroup] {
         var clusters = timeClusters(candidates, options: options)
         clusters = mergingCopies(clusters, options: options)
         return clusters
@@ -52,14 +71,13 @@ enum DuplicateGrouper {
     }
 
     /// Best photo first: favourites, then by a blend of aesthetics, face quality and sharpness.
-    static func rank(_ group: [Candidate]) -> [Candidate] {
-        let sharpest = group.map(\.analysis.sharpness).max() ?? 0
-        func score(_ c: Candidate) -> Double {
-            let a = c.analysis
-            var score = Double(a.aesthetics)
-            score += 0.5 * Double(a.faceQuality ?? 0)
+    public static func rank(_ group: [DuplicateCandidate]) -> [DuplicateCandidate] {
+        let sharpest = group.map(\.sharpness).max() ?? 0
+        func score(_ c: DuplicateCandidate) -> Double {
+            var score = Double(c.aesthetics)
+            score += 0.5 * Double(c.faceQuality ?? 0)
             // Relative within the group: absolute sharpness depends too much on content.
-            if sharpest > 0 { score += 0.4 * (a.sharpness / sharpest) }
+            if sharpest > 0 { score += 0.4 * (c.sharpness / sharpest) }
             if c.isEdited { score += 0.2 }
             return score
         }
@@ -72,10 +90,10 @@ enum DuplicateGrouper {
             .map(\.candidate)
     }
 
-    static func areSimilar(_ a: Candidate, _ b: Candidate, options: Options) -> Bool {
+    public static func areSimilar(_ a: DuplicateCandidate, _ b: DuplicateCandidate, options: Options) -> Bool {
         if let burst = a.burstID, burst == b.burstID { return true }
-        if ImageMetrics.hammingDistance(a.analysis.dHash, b.analysis.dHash) <= options.maxHashDistance { return true }
-        return FeaturePrint.distance(a.analysis.featurePrint, b.analysis.featurePrint) <= options.maxFeatureDistance
+        if (a.dHash ^ b.dHash).nonzeroBitCount <= options.maxHashDistance { return true }
+        return FeaturePrint.distance(a.featurePrint, b.featurePrint) <= options.maxFeatureDistance
     }
 
     // MARK: - Steps
@@ -83,11 +101,11 @@ enum DuplicateGrouper {
     /// Walks the photos in capture order, adding each to the nearby cluster it's most similar to.
     /// A photo joins only if it resembles every member already there, so a slow pan doesn't chain
     /// into one huge group.
-    private static func timeClusters(_ candidates: [Candidate], options: Options) -> [[Candidate]] {
+    private static func timeClusters(_ candidates: [DuplicateCandidate], options: Options) -> [[DuplicateCandidate]] {
         let dated = candidates.filter { $0.createdAt != nil }.sorted { $0.createdAt! < $1.createdAt! }
         var clusters = candidates.filter { $0.createdAt == nil }.map { [$0] }
 
-        var open: [[Candidate]] = []
+        var open: [[DuplicateCandidate]] = []
         for candidate in dated {
             let time = candidate.createdAt!
             // Close clusters whose newest photo is out of range; nothing later can join them.
@@ -109,7 +127,7 @@ enum DuplicateGrouper {
 
     /// Joins clusters holding byte-for-byte-looking copies (same hash and size), however far
     /// apart they were taken, e.g. a photo imported twice or saved from a message.
-    private static func mergingCopies(_ clusters: [[Candidate]], options: Options) -> [[Candidate]] {
+    private static func mergingCopies(_ clusters: [[DuplicateCandidate]], options: Options) -> [[DuplicateCandidate]] {
         var parent = Array(clusters.indices)
         func root(_ i: Int) -> Int {
             var i = i
@@ -118,29 +136,28 @@ enum DuplicateGrouper {
         }
 
         struct CopyKey: Hashable { let hash: UInt64; let width: Int; let height: Int }
-        var firstCluster: [CopyKey: (cluster: Int, candidate: Candidate)] = [:]
+        var firstCluster: [CopyKey: (cluster: Int, candidate: DuplicateCandidate)] = [:]
         for (index, cluster) in clusters.enumerated() {
             for candidate in cluster {
-                let a = candidate.analysis
-                let key = CopyKey(hash: a.dHash, width: a.pixelWidth, height: a.pixelHeight)
+                let key = CopyKey(hash: candidate.dHash, width: candidate.pixelWidth, height: candidate.pixelHeight)
                 guard let first = firstCluster[key] else {
                     firstCluster[key] = (index, candidate)
                     continue
                 }
                 // Featureless images (all black, all sky) can share a hash; make sure they match.
-                if FeaturePrint.distance(first.candidate.analysis.featurePrint, a.featurePrint) <= options.maxFeatureDistance / 3 {
+                if FeaturePrint.distance(first.candidate.featurePrint, candidate.featurePrint) <= options.maxFeatureDistance / 3 {
                     parent[root(index)] = root(first.cluster)
                 }
             }
         }
 
-        var merged: [Int: [Candidate]] = [:]
+        var merged: [Int: [DuplicateCandidate]] = [:]
         for (index, cluster) in clusters.enumerated() { merged[root(index), default: []] += cluster }
         return Array(merged.values)
     }
 
-    private static func worstDistance(_ cluster: [Candidate], _ candidate: Candidate) -> Float {
-        cluster.map { FeaturePrint.distance($0.analysis.featurePrint, candidate.analysis.featurePrint) }.max() ?? 0
+    private static func worstDistance(_ cluster: [DuplicateCandidate], _ candidate: DuplicateCandidate) -> Float {
+        cluster.map { FeaturePrint.distance($0.featurePrint, candidate.featurePrint) }.max() ?? 0
     }
 }
 

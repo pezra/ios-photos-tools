@@ -192,14 +192,14 @@ final class TripsModel {
         guard !Task.isCancelled else { return nil }
 
         return trip.sites.flatMap { site in
-            let candidates = site.photoIDs.compactMap { id -> Candidate? in
+            let candidates = site.photoIDs.compactMap { id -> DuplicateCandidate? in
                 guard let asset = assets[id], let analysis = analyses[id] else { return nil }
-                return Candidate(analysis: analysis, asset: asset)
+                return DuplicateCandidate(analysis: analysis, asset: asset)
             }
             // Keep only the best of each set of retakes, so a site's picks aren't the same shot.
             let retakes = Set(DuplicateGrouper.groups(candidates).flatMap { $0.assetIDs.dropFirst() })
             let shots = candidates.filter { !retakes.contains($0.id) }.map { c in
-                let a = c.analysis
+                let a = analyses[c.id]!
                 return PickCandidate(id: c.id, aesthetics: a.aesthetics, isUtility: a.isUtility,
                                      faceCount: a.faceCount, faceArea: a.faceArea, personArea: a.personArea,
                                      faceQuality: a.faceQuality, sharpness: a.sharpness,
