@@ -69,16 +69,14 @@ final class SettingsStore {
         DriveBackupEngine.stop()
         let previousID = DriveDestination.id
         try DriveDestination.configure(folder: folder)
-        BackupStore.shared.forgetDrives(except: DriveDestination.id)
-        if DriveDestination.id != previousID { BackupStore.shared.forgetDriveContents() }
+        try StorageInventory.useDrive(DriveDestination.id, assumingPrevious: previousID)
         driveName = DriveDestination.name
     }
 
     func forgetDrive() {
         DriveBackupEngine.stop()
         DriveDestination.forget()
-        BackupStore.shared.forgetDrives(except: nil)
-        BackupStore.shared.forgetDriveContents()
+        try? StorageInventory.useDrive(nil, assumingPrevious: nil)
         driveName = nil
     }
 

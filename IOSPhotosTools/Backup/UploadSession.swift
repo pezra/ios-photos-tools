@@ -77,7 +77,7 @@ final class UploadSession: NSObject, URLSessionDataDelegate, @unchecked Sendable
             // upload whose response was lost) is adopted, and anything else gets a new name.
             store.retirePaths(forResource: resourceID)
         } else {
-            if status == 501 { StorageInventory.recheckConditionalWrites() }
+            if status == 501 { StorageInventory.recheckConditionalWrites(afterUploadOf: resourceID) }
             store.markFailed(resourceID, error: S3Error.from(status: status, body: body).localizedDescription)
         }
         Staging.remove(stagedName)

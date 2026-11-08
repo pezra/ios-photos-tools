@@ -331,6 +331,88 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertNil(store.completedAssets()["a"])
     }
 
+    // MARK: - Destinations
+
+    func testRecheckingConditionalWritesAppliesToTheBucketTheUploadWentTo() throws {
+        open()
+        XCTAssertFalse(useBucket("A"))
+        add([row("a#1", "a", "2026/A.HEIC")], asset: "a")
+        upload("a#1")
+        XCTAssertTrue(useBucket("B"), "the user moved on while it was uploading")
+
+        XCTAssertEqual(store.requestConditionalWritesRecheck(afterUploadOf: "a#1"), "svc/A/p")
+        XCTAssertTrue(store.needsConditionalWritesRecheck(bucket: "svc/A/p"))
+        XCTAssertFalse(store.needsConditionalWritesRecheck(bucket: "svc/B/p"))
+
+        store.conditionalWritesRechecked(bucket: "svc/B/p")
+        XCTAssertTrue(store.needsConditionalWritesRecheck(bucket: "svc/A/p"), "asking B doesn't answer for A")
+        store.conditionalWritesRechecked(bucket: "svc/A/p")
+        XCTAssertFalse(store.needsConditionalWritesRecheck(bucket: "svc/A/p"))
+    }
+
+    func testRecheckWithNoBucketOnTheUploadCreditsTheCurrentOne() {
+        open()
+        XCTAssertFalse(useBucket("A"))
+        XCTAssertEqual(store.requestConditionalWritesRecheck(afterUploadOf: "nothing"), "svc/A/p")
+        XCTAssertTrue(store.needsConditionalWritesRecheck(bucket: "svc/A/p"))
+    }
+
+    func testSwitchingBucketsKeepsWhatWasLearnedAboutEach() {
+        open()
+        XCTAssertFalse(useBucket("A"))
+        let a = Destination.bucket("svc/A/p")
+        store.setMeta(a.mergedKey, "1")
+        store.setMeta(a.conditionalWritesKey, "1 100")
+        XCTAssertTrue(useBucket("B"))
+        XCTAssertTrue(useBucket("A"))
+        XCTAssertNotNil(store.meta(a.mergedKey), "A isn't merged again")
+        XCTAssertNotNil(store.meta(a.conditionalWritesKey), "or asked again")
+    }
+
+    private func metaKeys() -> Set<String> {
+        Set(["current-drive"] + Destination.drive("old").metaKeys + Destination.drive("new").metaKeys)
+            .filter { store.meta($0) != nil }
+    }
+
+    func testChangingTheDriveFolderLeavesNothingOfTheOldOneBehind() throws {
+        open()
+        XCTAssertFalse(try store.useDrive("old"), "first use")
+        for key in Destination.drive("old").metaKeys { store.setMeta(key, "x") }
+        XCTAssertTrue(store.addInventory(source: .drive, entries: [InventoryEntry(source: .drive, path: "2026/A.HEIC", size: 1)]))
+
+        XCTAssertTrue(try store.useDrive("new"))
+        XCTAssertEqual(metaKeys(), ["current-drive"])
+        XCTAssertEqual(store.meta("current-drive"), "new")
+        XCTAssertTrue(store.inventory().isEmpty)
+        XCTAssertFalse(try store.useDrive("new"), "only once")
+
+        for key in Destination.drive("new").metaKeys { store.setMeta(key, "y") }
+        XCTAssertTrue(try store.useDrive("old"), "and back")
+        XCTAssertEqual(metaKeys(), ["current-drive"])
+    }
+
+    func testForgettingTheDriveRemovesItsKeys() throws {
+        open()
+        XCTAssertFalse(try store.useDrive("old"))
+        for key in Destination.drive("old").metaKeys { store.setMeta(key, "x") }
+        XCTAssertTrue(try store.useDrive(nil))
+        XCTAssertEqual(metaKeys(), [])
+    }
+
+    func testADriveFolderNotRecordedYetIsTakenFromWhatWasThereBefore() throws {
+        open()
+        for key in Destination.drive("old").metaKeys { store.setMeta(key, "x") }
+        XCTAssertFalse(try store.useDrive("old", assumingPrevious: "old"), "the same folder, just not recorded")
+        XCTAssertEqual(store.meta(Destination.drive("old").mergedKey), "x")
+        XCTAssertTrue(try store.useDrive("new", assumingPrevious: "old"))
+        XCTAssertEqual(metaKeys(), ["current-drive"])
+    }
+
+    func testDestinationKeysAreUnique() {
+        let keys = Destination.drive("x").metaKeys + Destination.bucket("x").metaKeys
+        XCTAssertEqual(Set(keys).count, keys.count)
+    }
+
     // MARK: - Files that are gone
 
     func testRevertedEditLetsItsPhotoComplete() {

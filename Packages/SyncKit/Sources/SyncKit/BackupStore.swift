@@ -319,6 +319,60 @@ public final class BackupStore: @unchecked Sendable {
         }
     }
 
+    /// Makes `id` the drive folder copied to (nil for none). Switching from another one forgets
+    /// what was copied to it and what was found in it, and deletes what's kept about it in `meta`,
+    /// so nothing is left behind for folders no longer used. `assumingPrevious` is the folder before
+    /// this was recorded, for a database that doesn't say. Returns whether another one was forgotten.
+    @discardableResult
+    public func useDrive(_ id: String?, assumingPrevious: String? = nil) throws -> Bool {
+        try locked {
+            let recorded = query("SELECT value FROM meta WHERE key = 'current-drive'") { text($0, 0) }.first ?? nil
+            let previous = recorded ?? assumingPrevious
+            guard recorded != id else { return false }
+            let forgets = previous != nil && previous != id
+            let saved = transaction {
+                if let id {
+                    execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('current-drive', ?)", [id])
+                } else {
+                    execute("DELETE FROM meta WHERE key = 'current-drive'")
+                }
+                guard forgets, let previous else { return }
+                for key in Destination.drive(previous).metaKeys { execute("DELETE FROM meta WHERE key = ?", [key]) }
+                execute("DELETE FROM drive_assets WHERE drive_id IS NOT ?", [id])
+                execute("UPDATE handled_paths SET on_drive = 0 WHERE on_drive != 0")
+                execute("DELETE FROM remote_files WHERE source = ?", [StorageSource.drive.rawValue])
+                bumpHandledVersion()
+            }
+            guard saved else { throw Failure.couldNotSave }
+            return forgets
+        }
+    }
+
+    /// Notes that an upload was turned away for asking to be refused if its name was taken, which
+    /// means the bucket's last answer on whether it can is out of date. It's the bucket the upload
+    /// was sent to that is to be asked again, not whichever one is chosen now (the current one, for an
+    /// upload that doesn't say). Returns that bucket.
+    @discardableResult
+    public func requestConditionalWritesRecheck(afterUploadOf resourceID: String) -> String? {
+        locked {
+            let sent = query("SELECT upload_bucket FROM resources WHERE id = ?", [resourceID]) { text($0, 0) }.first ?? nil
+            let current = query("SELECT value FROM meta WHERE key = 'current-bucket'") { text($0, 0) }.first ?? nil
+            guard let bucket = sent ?? current else { return nil }
+            execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')", [Destination.bucket(bucket).recheckConditionalWritesKey])
+            return bucket
+        }
+    }
+
+    /// Whether `bucket`'s answer on conditional writes is to be asked for again.
+    public func needsConditionalWritesRecheck(bucket: String) -> Bool {
+        meta(Destination.bucket(bucket).recheckConditionalWritesKey) == "1"
+    }
+
+    /// For when `bucket` has been asked.
+    public func conditionalWritesRechecked(bucket: String) {
+        locked { execute("DELETE FROM meta WHERE key = ?", [Destination.bucket(bucket).recheckConditionalWritesKey]) }
+    }
+
     private func forgetBucketHistory() {
         execute("DELETE FROM resources WHERE state != ?", [ResourceState.uploading.rawValue])
         // These can't be stopped, and may be headed for the old bucket, so finishing mustn't

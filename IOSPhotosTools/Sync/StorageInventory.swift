@@ -20,9 +20,10 @@ enum StorageInventory {
     /// saved as it goes, so one cut short carries on next time. `progress` is told how many files
     /// have been found so far.
     static func prepareDrive(root: URL, driveID: String, progress: ((Int) async -> Void)? = nil) async throws {
+        try useDrive(driveID, assumingPrevious: nil)
         try mergeHandledPaths(fromDrive: root, driveID: driveID)
         let found = try await Log.interval("drive listing") {
-            try await DriveListing(store: store, root: root, key: "drive-listing-\(driveID)")
+            try await DriveListing(store: store, root: root, key: Destination.drive(driveID).listingKey)
                 .run(freshFor: driveListingFreshFor, progress: progress)
         }
         if let found {
@@ -32,24 +33,33 @@ enum StorageInventory {
         }
     }
 
+    /// The drive folder changed, if it isn't the one last used: what was kept about the old one goes.
+    /// Choosing a folder does this straight away; this catches up a database that wasn't told.
+    static func useDrive(_ driveID: String?, assumingPrevious: String?) throws {
+        if try store.useDrive(driveID, assumingPrevious: assumingPrevious) {
+            Log.pass.info("Drive folder changed: what was kept about the old one is gone")
+        }
+    }
+
     private static func mergeHandledPaths(fromDrive root: URL, driveID: String) throws {
-        let key = "merged-drive-\(driveID)"
+        let key = Destination.drive(driveID).mergedKey
         guard store.meta(key) == nil else { return }
         let file = root.appending(path: HandledPathsFile.relativePath)
         if FileManager.default.fileExists(atPath: file.path) {
             guard store.mergeHandled(HandledPathsFile.decode(try Data(contentsOf: file)), from: .drive) else { throw BackupStore.Failure.couldNotSave }
         }
         store.setMeta(key, "1")
+        Log.handledPaths.info("Merged handled paths from the drive")
     }
 
     /// Writes the record to the drive if it's out of date. `force` writes any change at all;
     /// otherwise this waits until 5 minutes have passed since the last write.
     static func writeHandledPaths(toDrive root: URL, driveID: String, force: Bool) async {
-        guard store.meta("merged-drive-\(driveID)") != nil else { return }
+        guard store.meta(Destination.drive(driveID).mergedKey) != nil else { return }
         let file = root.appending(path: HandledPathsFile.relativePath)
         let partial = file.deletingLastPathComponent().appending(path: ".\(file.lastPathComponent).partial")
         do {
-            let version = try await writer("written-drive-\(driveID)").write(force: force) { data in
+            let version = try await writer(Destination.drive(driveID).writtenKey).write(force: force) { data in
                 do {
                     try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try data.write(to: partial)
@@ -123,7 +133,7 @@ enum StorageInventory {
         let known = store.meta(key)?.split(separator: " ")
         let isCurrent = known.flatMap { $0.last }.flatMap { Double($0) }
             .map { Date().timeIntervalSince1970 - $0 < conditionalWritesCheckInterval } ?? false
-        if let answer = known?.first, isCurrent, store.meta(recheckConditionalWritesKey) != "1" { return answer == "1" }
+        if let answer = known?.first, isCurrent, !store.needsConditionalWritesRecheck(bucket: identity(client: client, prefix: prefix)) { return answer == "1" }
         do {
             return try await checkConditionalWrites(client: client, prefix: prefix, session: session)
         } catch {
@@ -137,7 +147,8 @@ enum StorageInventory {
         let probe = LibraryPath.key(prefix: prefix, path: ".photos-tools/conditional-write-check")
         let supported = try await client.supportsConditionalWrites(key: probe, session: session)
         store.setMeta(conditionalWritesKey(client: client, prefix: prefix), "\(supported ? 1 : 0) \(Date().timeIntervalSince1970)")
-        store.setMeta(recheckConditionalWritesKey, "0")
+        store.conditionalWritesRechecked(bucket: identity(client: client, prefix: prefix))
+        Log.upload.info("Conditional writes checked: \(supported ? "supported" : "not supported", privacy: .public)")
         return supported
     }
 
@@ -146,16 +157,18 @@ enum StorageInventory {
         store.meta(conditionalWritesKey(client: client, prefix: prefix))?.hasPrefix("0") == true
     }
 
-    /// For an upload turned away for asking, which means the last answer is out of date.
-    static func recheckConditionalWrites() {
-        store.setMeta(recheckConditionalWritesKey, "1")
+    /// For an upload turned away for asking, which means the last answer for the bucket it was
+    /// sent to is out of date.
+    static func recheckConditionalWrites(afterUploadOf resourceID: String) {
+        if let bucket = store.requestConditionalWritesRecheck(afterUploadOf: resourceID) {
+            Log.upload.info("Upload refused for asking: \(bucket, privacy: .public) will be asked about conditional writes again")
+        }
     }
 
     private static let conditionalWritesCheckInterval: TimeInterval = 7 * 24 * 60 * 60
-    private static let recheckConditionalWritesKey = "recheck-conditional-writes"
 
     private static func conditionalWritesKey(client: S3Client, prefix: String) -> String {
-        "conditional-writes-\(identity(client: client, prefix: prefix))"
+        destination(client: client, prefix: prefix).conditionalWritesKey
     }
 
     /// Whether the listing kept, which name collisions are checked against, is this bucket's. It's
@@ -166,7 +179,7 @@ enum StorageInventory {
     }
 
     private static func mergeHandledPaths(fromS3 client: S3Client, prefix: String, session: URLSession) async throws {
-        let key = "merged-s3-\(identity(client: client, prefix: prefix))"
+        let key = destination(client: client, prefix: prefix).mergedKey
         guard store.meta(key) == nil else { return }
         do {
             let data = try await client.getObject(key: handledKey(prefix: prefix), session: session)
@@ -175,14 +188,14 @@ enum StorageInventory {
             // Nothing there yet.
         }
         store.setMeta(key, "1")
+        Log.handledPaths.info("Merged handled paths from the bucket")
     }
 
     static func writeHandledPaths(toS3 client: S3Client, prefix: String, force: Bool, session: URLSession) async {
-        let id = identity(client: client, prefix: prefix)
-        guard store.meta("merged-s3-\(id)") != nil else { return }
+        guard store.meta(destination(client: client, prefix: prefix).mergedKey) != nil else { return }
         let key = handledKey(prefix: prefix)
         do {
-            let version = try await writer("written-s3-\(id)").write(force: force) { data in
+            let version = try await writer(destination(client: client, prefix: prefix).writtenKey).write(force: force) { data in
                 try await client.putObject(key: key, data: data, contentType: "application/x-ndjson", session: session)
             }
             if let version { Log.handledPaths.info("Wrote handled paths to the bucket at version \(version)") }
@@ -209,7 +222,11 @@ enum StorageInventory {
         return "\(service)/\(client.config.bucket)/\(prefix)"
     }
 
+    private static func destination(client: S3Client, prefix: String) -> Destination {
+        .bucket(identity(client: client, prefix: prefix))
+    }
+
     private static func listedKey(client: S3Client, prefix: String) -> String {
-        "listed-s3-\(identity(client: client, prefix: prefix))"
+        destination(client: client, prefix: prefix).listingKey
     }
 }
