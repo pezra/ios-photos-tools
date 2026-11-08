@@ -38,6 +38,9 @@ final class CleanupModel {
 
     private var scan: Task<Void, Never>?
     private var candidates: [DuplicateCandidate] = []
+    private var regrouping: Task<Void, Never>?
+    /// Photos the user marked (true) or unmarked while groups were being found.
+    private var tapsSinceRegroup: [String: Bool] = [:]
     /// Near duplicates the user unmarked. They stay unmarked in every later scan.
     private var kept = AnalysisStore.shared.keptIDs()
 
@@ -66,6 +69,7 @@ final class CleanupModel {
 
     func toggle(_ assetID: String) {
         let keep = marked.contains(assetID)
+        if regrouping != nil { tapsSinceRegroup[assetID] = !keep }
         if keep {
             marked.remove(assetID)
             kept.insert(assetID)
@@ -94,7 +98,7 @@ final class CleanupModel {
         }
 
         let deleted = Set(ids)
-        AnalysisStore.shared.remove(ids)
+        await Task.detached { AnalysisStore.shared.remove(ids) }.value
         candidates.removeAll { deleted.contains($0.id) }
         regroup()
         BackupStatus.shared.refresh()
@@ -118,32 +122,23 @@ final class CleanupModel {
         }
 
         let started = Date()
-        let library = await LibrarySnapshot.current().burstShots()
-        var cached = AnalysisStore.shared.all()
-        let libraryIDs = Set(library.map(\.localIdentifier))
-        AnalysisStore.shared.remove(Array(Set(cached.keys).union(kept).subtracting(libraryIDs)))
-        kept.formIntersection(libraryIDs)
-        cached = cached.filter { libraryIDs.contains($0.key) }
-
-        let assets: [PHAsset]
-        switch scope {
-        case .wholeLibrary:
-            assets = library
-        case .recent:
-            // Reach back one grouping window so shots straddling the cutoff still get compared.
-            let since = recentCutoff.addingTimeInterval(-DuplicateGrouper.Options().window)
-            assets = library.filter { ($0.creationDate ?? .distantPast) >= since }
-        }
-
-        let pending = assets.filter {
-            LibraryAnalyzer.needsAnalysis($0, cached: cached[$0.localIdentifier])
-        }
+        let scope = scope
+        // Reach back one grouping window so shots straddling the cutoff still get compared.
+        let since = recentCutoff.addingTimeInterval(-DuplicateGrouper.Options().window)
+        let kept = kept
+        let plan = await Task.detached(priority: .userInitiated) {
+            await Self.plan(scope: scope, since: since, kept: kept)
+        }.value
+        // Taps made during the scan changed `kept` meanwhile, so only drop what left the library.
+        self.kept.formIntersection(plan.libraryIDs)
+        let assets = plan.assets
         totalCount = assets.count
-        analyzedCount = assets.count - pending.count
+        analyzedCount = assets.count - plan.pending.count
+        Log.library.info("Cleanup: \(assets.count) photos in scope, \(plan.cached.count) analyses loaded, \(plan.pending.count) to analyze, planned in \(Date().timeIntervalSince(started), format: .fixed(precision: 2)) s")
 
-        var analyses = cached
+        var analyses = plan.cached
         var failures = 0
-        await LibraryAnalyzer.analyze(pending) { id, result in
+        await LibraryAnalyzer.analyze(plan.pending) { id, result in
             switch result {
             case .success(let analysis):
                 analyses[id] = analysis
@@ -155,10 +150,16 @@ final class CleanupModel {
             phase = "Analyzing \(analyzedCount) of \(totalCount)"
         }
 
-        candidates = assets.compactMap { asset in
-            analyses[asset.localIdentifier].map { DuplicateCandidate(analysis: $0, asset: asset) }
-        }
-        regroup()
+        phase = "Grouping…"
+        let all = analyses
+        candidates = await Task.detached(priority: .userInitiated) {
+            assets.compactMap { asset in
+                all[asset.localIdentifier].map { DuplicateCandidate(analysis: $0, asset: asset) }
+            }
+        }.value
+        let grouping = Date()
+        await regroup().value
+        Log.library.info("Cleanup: \(self.candidates.count) candidates grouped into \(self.groups.count) groups in \(Date().timeIntervalSince(grouping), format: .fixed(precision: 2)) s")
 
         if Task.isCancelled {
             phase = "Paused — \(totalCount - analyzedCount) photos left to analyze"
@@ -171,12 +172,69 @@ final class CleanupModel {
         }
     }
 
-    private func regroup() {
+    /// What a scan works on, found off the main thread.
+    private struct ScanPlan: @unchecked Sendable {
+        let assets: [PHAsset]
+        let cached: [String: PhotoAnalysis]
+        let pending: [PHAsset]
+        let libraryIDs: Set<String>
+    }
+
+    /// Lists the library, forgets what's no longer in it, and loads the cached analyses of the
+    /// photos in scope (not the whole cache for a recent scan).
+    private nonisolated static func plan(scope: Scope, since: Date, kept: Set<String>) async -> ScanPlan {
+        let library = await LibrarySnapshot.current().burstShots()
+        let store = AnalysisStore.shared
+        let libraryIDs = Set(library.map(\.localIdentifier))
+        store.remove(Array(store.analysisIDs().union(kept).subtracting(libraryIDs)))
+
+        var assets: [PHAsset]
+        let cached: [String: PhotoAnalysis]
+        switch scope {
+        case .wholeLibrary:
+            assets = library
+            cached = store.all().filter { libraryIDs.contains($0.key) }
+        case .recent:
+            assets = library.filter { ($0.creationDate ?? .distantPast) >= since }
+            cached = store.analyses(assets.map(\.localIdentifier))
+        }
+        #if DEBUG
+        if let limit = TestHooks.cleanupLimit { assets = Array(assets.prefix(limit)) }
+        #endif
+        let pending = assets.filter {
+            LibraryAnalyzer.needsAnalysis($0, cached: cached[$0.localIdentifier])
+        }
+        return ScanPlan(assets: assets, cached: cached, pending: pending, libraryIDs: libraryIDs)
+    }
+
+    /// Groups the candidates off the main thread. A newer call replaces one still running, and
+    /// taps made meanwhile are applied to whatever comes back.
+    @discardableResult
+    private func regroup() -> Task<Void, Never> {
+        regrouping?.cancel()
         var options = DuplicateGrouper.Options()
         options.maxFeatureDistance = Float(0.25 + 0.4 * looseness)
-        // Groups where the user has already kept every alternative have nothing left to decide.
-        groups = DuplicateGrouper.groups(candidates, options: options)
-            .filter { group in group.assetIDs.dropFirst().contains { !kept.contains($0) } }
-        marked = Set(groups.flatMap { $0.assetIDs.dropFirst() }).subtracting(kept)
+        let candidates = candidates
+        let kept = kept
+        let task = Task {
+            let work = Task.detached(priority: .userInitiated) {
+                // Groups where the user has already kept every alternative have nothing left to decide.
+                DuplicateGrouper.groups(candidates, options: options)
+                    .filter { group in group.assetIDs.dropFirst().contains { !kept.contains($0) } }
+            }
+            // A newer slider position stops this one's work instead of queueing behind it.
+            let found = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+            guard !Task.isCancelled else { return }
+            var marked = Set(found.flatMap { $0.assetIDs.dropFirst() }).subtracting(kept)
+            for (id, mark) in tapsSinceRegroup {
+                if mark { marked.insert(id) } else { marked.remove(id) }
+            }
+            groups = found
+            self.marked = marked
+            tapsSinceRegroup = [:]
+            regrouping = nil
+        }
+        regrouping = task
+        return task
     }
 }

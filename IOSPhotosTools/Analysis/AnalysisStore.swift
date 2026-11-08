@@ -53,6 +53,11 @@ final class AnalysisStore: @unchecked Sendable {
         }
     }
 
+    /// The photos that have a cached analysis, without loading the analyses.
+    func analysisIDs() -> Set<String> {
+        locked { Set(query("SELECT id FROM analyses") { text($0, 0) ?? "" }) }
+    }
+
     /// Cached analyses of just these photos.
     func analyses(_ ids: [String]) -> [String: PhotoAnalysis] {
         locked {

@@ -25,6 +25,12 @@ import SyncKit
 /// - `PT_TEST_WATCHDOG`: any value. A timer on the main thread logs each time it fires more than
 ///   100 ms late, and a total every 10 seconds, as a stand-in for Instruments' hangs report (which
 ///   the simulator can't record). Category `background`, messages starting "Watchdog".
+/// - `PT_TEST_CLEANUP`: actions on the Duplicates screen, each `name@seconds` after launch, separated
+///   by semicolons: `open`, `scan`, `scope:recent` or `scope:whole`, and `slider:0.8` (released at that
+///   position), `limit:N` (scan only the newest N photos), and `seed:N`, which saves made-up analyses for the newest N photos (the simulator can't
+///   run Vision), in runs of three that look alike. For example `scope:whole@2;open@3;scan@5;slider:0.9@30`. Logged in category `background`.
+/// - `PT_TEST_TRIPS_SAVE`: seconds. That long after launch, asks for the trips file to be saved
+///   (with what it holds), to see a save wait out its delay or be flushed when the app is backgrounded.
 /// - `PT_TEST_PAUSE_DRIVE_IN_SYNC`: any value. Pauses the drive when the sync pass first starts,
 ///   which leaves the sync running.
 enum TestHooks {
@@ -86,9 +92,83 @@ enum TestHooks {
         if let spec = environment["PT_TEST_TAP"] {
             for part in spec.split(separator: ";") { tap(String(part)) }
         }
+        if let after = environment["PT_TEST_TRIPS_SAVE"].flatMap(Double.init) {
+            Task.detached {
+                try? await Task.sleep(for: .seconds(after))
+                Log.background.info("Test hook: saving trips")
+                TripStore.save(TripStore.load())
+            }
+        }
+        if let spec = environment["PT_TEST_CLEANUP"] {
+            for part in spec.split(separator: ";") { cleanup(String(part)) }
+        }
         if let count = environment["PT_TEST_EDIT"].flatMap(Int.init) {
             Task.detached { await editPhotos(count) }
         }
+    }
+
+    /// How many photos a Duplicates scan looks at, if `limit:N` was given.
+    nonisolated(unsafe) static var cleanupLimit: Int?
+
+    /// Posted to have the home screen open Duplicates.
+    static let openCleanup = Notification.Name("PTOpenCleanup")
+
+    private static func cleanup(_ spec: String) {
+        let parts = spec.split(separator: "@").map(String.init)
+        guard parts.count == 2, let after = Double(parts[1]) else {
+            return Log.background.error("PT_TEST_CLEANUP action isn't name@seconds")
+        }
+        let action = parts[0]
+        if action.hasPrefix("seed:"), let count = Int(action.dropFirst(5)) {
+            Task.detached {
+                try? await Task.sleep(for: .seconds(after))
+                await seedAnalyses(count)
+            }
+            return
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(after))
+            Log.background.info("Test hook: cleanup \(action, privacy: .public)")
+            let model = CleanupModel.shared
+            switch action.split(separator: ":").map(String.init) {
+            case ["open"]: NotificationCenter.default.post(name: openCleanup, object: nil)
+            case ["scan"]: model.start()
+            case let parts where parts.count == 2 && parts[0] == "limit" && Int(parts[1]) != nil:
+                cleanupLimit = Int(parts[1])
+            case ["scope", "recent"]: model.scope = .recent
+            case ["scope", "whole"]: model.scope = .wholeLibrary
+            case let parts where parts.count == 2 && parts[0] == "slider" && Double(parts[1]) != nil:
+                model.looseness = Double(parts[1])!
+            default: Log.background.error("PT_TEST_CLEANUP doesn't know \(action, privacy: .public)")
+            }
+        }
+    }
+
+    private static func seedAnalyses(_ count: Int) async {
+        let assets = await LibrarySnapshot.current().burstShots().prefix(count)
+        var state: UInt64 = 42
+        func next() -> Float {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Float(state >> 40) / Float(1 << 24) - 0.5
+        }
+        var scene: [Float] = []
+        var sceneHash: UInt64 = 0
+        for (index, asset) in assets.enumerated() {
+            if index % 3 == 0 {
+                scene = (0..<768).map { _ in next() }
+                sceneHash = UInt64(bitPattern: Int64(truncatingIfNeeded: state))
+            }
+            var print = scene.map { $0 + 0.01 * next() }
+            let length = print.reduce(0) { $0 + $1 * $1 }.squareRoot()
+            print = print.map { $0 / length }
+            AnalysisStore.shared.save(PhotoAnalysis(
+                assetID: asset.localIdentifier, modifiedAt: asset.modificationDate?.timeIntervalSince1970,
+                pixelWidth: asset.pixelWidth, pixelHeight: asset.pixelHeight,
+                dHash: sceneHash ^ UInt64(index % 3), featurePrint: print, aesthetics: Float(index % 7) / 10,
+                isUtility: false, faceQuality: nil, faceCount: 0, faceArea: 0, personArea: 0,
+                sharpness: Double(10 + index % 5), version: PhotoAnalyzer.version))
+        }
+        Log.background.info("Test hook: seeded \(assets.count) analyses")
     }
 
     private static func watchMainThread() {

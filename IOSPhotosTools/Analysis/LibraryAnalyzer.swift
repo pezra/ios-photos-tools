@@ -22,14 +22,19 @@ enum LibraryAnalyzer {
             func addNext() {
                 guard !Task.isCancelled, let asset = queue.next() else { return }
                 group.addTask {
-                    do { return (asset.localIdentifier, .success(try await PhotoAnalyzer.analyze(asset))) }
-                    catch { return (asset.localIdentifier, .failure(error)) }
+                    do {
+                        let analysis = try await PhotoAnalyzer.analyze(asset)
+                        // Saved here, off the main actor, since the store waits on its lock.
+                        AnalysisStore.shared.save(analysis)
+                        return (asset.localIdentifier, .success(analysis))
+                    } catch {
+                        return (asset.localIdentifier, .failure(error))
+                    }
                 }
             }
             for _ in 0..<concurrency { addNext() }
 
             while let (id, result) = await group.next() {
-                if case .success(let analysis) = result { AnalysisStore.shared.save(analysis) }
                 onResult(id, result)
                 addNext()
             }

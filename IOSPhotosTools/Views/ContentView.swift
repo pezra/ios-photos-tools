@@ -8,6 +8,9 @@ struct ContentView: View {
     @Environment(DriveStatus.self) private var drive
     @Environment(SyncStatus.self) private var sync
     @State private var showingSettings = false
+    #if DEBUG
+    @State private var showingCleanup = false
+    #endif
 
     var body: some View {
         NavigationStack {
@@ -86,6 +89,10 @@ struct ContentView: View {
                 SettingsView()
             }
             .task { await requestPhotoAccess() }
+            #if DEBUG
+            .navigationDestination(isPresented: $showingCleanup) { CleanupView() }
+            .onReceive(NotificationCenter.default.publisher(for: TestHooks.openCleanup)) { _ in showingCleanup = true }
+            #endif
         }
     }
 
