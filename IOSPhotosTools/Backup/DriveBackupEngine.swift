@@ -309,6 +309,9 @@ enum DriveBackgroundTask {
             }
             Task {
                 await DriveBackupEngine.shared.follow(task)
+                // Even when it expired: the handler can't tell iOS cutting it short from the user
+                // stopping it, and failure would show a "failed" notification for a stop they chose.
+                // A pass cut short carries on next time anyway.
                 task.setTaskCompleted(success: true)
             }
         }
