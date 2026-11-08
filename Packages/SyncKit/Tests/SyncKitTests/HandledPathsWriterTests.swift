@@ -83,9 +83,12 @@ final class HandledPathsWriterTests: XCTestCase {
         XCTAssertNil(forcedUnchanged, "forcing doesn't write what's already there")
 
         claim("2026/B.HEIC")
-        clock.advance(-500)
+        let late = try await put(force: false)
+        XCTAssertEqual(late, store.handledVersion, "changed, and 10 minutes since the last write")
+
+        claim("2026/C.HEIC")
         let early = try await put(force: false)
-        XCTAssertNil(early, "changed, but under 5 minutes since the last write")
+        XCTAssertNil(early, "changed, but just written")
         clock.advance(299)
         let almost = try await put(force: false)
         XCTAssertNil(almost)
@@ -93,11 +96,11 @@ final class HandledPathsWriterTests: XCTestCase {
         let due = try await put(force: false)
         XCTAssertEqual(due, store.handledVersion, "5 minutes since the last write")
 
-        claim("2026/C.HEIC")
+        claim("2026/D.HEIC")
         let forced = try await put(force: true)
         XCTAssertEqual(forced, store.handledVersion, "forcing writes a change at once")
         let count = await destination.contents.count
-        XCTAssertEqual(count, 3)
+        XCTAssertEqual(count, 4)
     }
 
     func testTimeIsKeptPerDestination() async throws {
