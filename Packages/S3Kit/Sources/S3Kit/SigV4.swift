@@ -7,12 +7,17 @@ enum SigV4 {
     static let algorithm = "AWS4-HMAC-SHA256"
     static let unsignedPayload = "UNSIGNED-PAYLOAD"
 
-    static func timestamps(for date: Date) -> (amzDate: String, dateStamp: String) {
+    /// Made once, since every signed request needs one. Formatting with it is thread-safe.
+    private static let amzDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: "UTC")
         formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        let amzDate = formatter.string(from: date)
+        return formatter
+    }()
+
+    static func timestamps(for date: Date) -> (amzDate: String, dateStamp: String) {
+        let amzDate = amzDateFormatter.string(from: date)
         return (amzDate, String(amzDate.prefix(8)))
     }
 
