@@ -360,7 +360,7 @@ public final class BackupStore: @unchecked Sendable {
     @discardableResult
     public func markDriveAssetComplete(_ assetID: String, driveID: String, modifiedAt: Double?, files: [ResourceRow]) -> Bool {
         locked {
-            guard files.allSatisfy({ holds($0.id, $0.path) }) else { return false }
+            guard files.allSatisfy({ holder(ofPath: $0.path) == .resource($0.id) }) else { return false }
             execute("INSERT OR REPLACE INTO drive_assets (drive_id, asset_id, completed_at, modified_at) VALUES (?, ?, ?, ?)",
                     [driveID, assetID, now, modifiedAt])
             return true
@@ -471,7 +471,8 @@ public final class BackupStore: @unchecked Sendable {
     @discardableResult
     public func markOnDrive(_ path: String, resource id: String) -> Bool {
         locked {
-            guard holds(id, path) else { return false }
+            // Only the path: the drive pass works without the bucket pass's rows.
+            guard holder(ofPath: path) == .resource(id) else { return false }
             execute("UPDATE handled_paths SET on_drive = 1 WHERE norm = ? AND on_drive = 0", [LibraryPath.normalized(path)])
             if sqlite3_changes(db) > 0 { bumpHandledVersion() }
             return true

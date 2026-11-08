@@ -144,6 +144,16 @@ final class BackupStoreTests: XCTestCase {
         }
     }
 
+    func testDriveMarksWithoutTheBucketPass() {
+        open()
+        let a = [row("a#1", "a", "2026/A.HEIC")]
+        XCTAssertTrue(store.claim(a))
+        XCTAssertTrue(store.markOnDrive("2026/A.HEIC", resource: "a#1"))
+        XCTAssertTrue(store.isOnDrive("2026/A.HEIC"))
+        XCTAssertTrue(store.markDriveAssetComplete("a", driveID: "d", modifiedAt: 5, files: a))
+        XCTAssertNotNil(store.completedDriveAssets(driveID: "d")["a"])
+    }
+
     func testUploadFinishingAfterItsPathChangedIsSentAgain() {
         open()
         add([row("a#1", "a", "2026/A.HEIC")], asset: "a")
