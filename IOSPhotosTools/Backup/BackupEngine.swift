@@ -13,6 +13,9 @@ actor BackupEngine {
     /// Presigned URLs (rather than header signatures, which expire after ~15 minutes) let the
     /// system start a queued upload whenever it likes.
     private let urlLifetime = 7 * 24 * 60 * 60
+    /// How long a pass waits for uploads when none has finished. They carry on in the background
+    /// session either way, but some can be held back indefinitely, such as ones waiting for Wi-Fi.
+    private let uploadStallLimit: Duration = .seconds(120)
 
     private let store = BackupStore.shared
     private var currentPass: Task<Void, Never>?
@@ -107,8 +110,15 @@ actor BackupEngine {
 
         if !Task.isCancelled {
             await report(phase: "Uploading…", running: true)
-            while !Task.isCancelled && store.count(.uploading) > 0 {
+            var uploading = store.count(.uploading)
+            var lastChange = ContinuousClock.now
+            while !Task.isCancelled && uploading > 0 && ContinuousClock.now - lastChange < uploadStallLimit {
                 try? await Task.sleep(for: .seconds(2))
+                let count = store.count(.uploading)
+                if count != uploading {
+                    uploading = count
+                    lastChange = .now
+                }
             }
             // Uploads the bucket turned away because of the name.
             if !isRetry && store.count(.pending) > 0 {
@@ -118,7 +128,11 @@ actor BackupEngine {
         await StorageInventory.writeHandledPaths(toS3: client, prefix: settings.prefix, force: true, session: session)
 
         let failed = store.count(.failed) + namingFailures
-        let phase = Task.isCancelled ? "Paused" : failed > 0 ? "Finished with \(failed) failed files" : "Up to date"
+        let uploading = store.count(.uploading)
+        let phase = Task.isCancelled ? "Paused"
+            : failed > 0 ? "Finished with \(failed) failed files"
+            : uploading > 0 ? "\(uploading) files still uploading"
+            : "Up to date"
         await report(phase: phase, running: false, error: failed > 0 ? store.lastError() ?? namingError : nil, finished: !Task.isCancelled)
     }
 
