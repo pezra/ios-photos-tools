@@ -152,6 +152,7 @@ actor DriveBackupEngine {
             }
             failed += 1
             lastError = error.localizedDescription
+            Log.pass.error("drive: \(asset.localIdentifier, privacy: .public) not copied: \(error.localizedDescription, privacy: .public)")
         }
         setProgress(pending.count, of: pending.count)
         if !disconnected {
@@ -198,6 +199,11 @@ actor DriveBackupEngine {
 
     /// Whether the file at `existing` has the same contents as `resource`.
     private func isSameFile(_ resource: PHAssetResource, existing: URL) async throws -> Bool {
+        switch BackupPaths.match(resource, storedSizes: existing.fileSize.map { [$0] } ?? []) {
+        case .same: return true
+        case .different: return false
+        case .compare: break
+        }
         let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: copy) }
         try await PhotoLibrary.stream(resource, to: copy)

@@ -92,6 +92,11 @@ enum BackupPaths {
                 }
                 let entries = store.inventoryEntries(for: path)
                 guard !entries.isEmpty else { return false }
+                switch match(resources[index], storedSizes: entries.map(\.size)) {
+                case .same: return true
+                case .different: return false
+                case .compare: break
+                }
 
                 let export: Export
                 if let cached = exports[index] {
@@ -106,6 +111,16 @@ enum BackupPaths {
                 return try await sha256(ofExisting: entries, path: path) == export.sha256
             }
         )
+    }
+
+    /// Whether `resource` is the file whose copies in storage have `storedSizes`, going by size
+    /// where that's enough. The one place the app makes this decision.
+    static func match(_ resource: PHAssetResource, storedSizes: [Int64]) -> SameFile {
+        let isEdit = PhotoLibrary.editedTypes.contains(resource.type)
+        let size = PhotoLibrary.fileSize(of: resource)
+        let verdict = SameFile.decide(isEdit: isEdit, photoSize: size, storedSizes: storedSizes)
+        Log.hash.info("\(resource.originalFilename, privacy: .public): photo size \(size.map(String.init) ?? "unknown", privacy: .public), stored \(storedSizes.map(String.init).joined(separator: ","), privacy: .public), \(String(describing: verdict), privacy: .public)")
+        return verdict
     }
 
     private struct Export {

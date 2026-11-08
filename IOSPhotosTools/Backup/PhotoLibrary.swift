@@ -84,6 +84,15 @@ enum PhotoLibrary {
         UTType(resource.uniformTypeIdentifier)?.preferredMIMEType ?? "application/octet-stream"
     }
 
+    /// The size of `resource`'s file without reading it, from `PHAssetResource`'s undocumented
+    /// `fileSize` property. Nil if this system doesn't have it.
+    static func fileSize(of resource: PHAssetResource) -> Int64? {
+        guard resource.responds(to: NSSelectorFromString("fileSize")),
+              let size = (resource.value(forKey: "fileSize") as? NSNumber)?.int64Value, size > 0
+        else { return nil }
+        return size
+    }
+
     /// Writes the original bytes of `resource` to `url`, downloading from iCloud if necessary.
     static func export(_ resource: PHAssetResource, to url: URL) async throws {
         Log.export.info("Exporting \(resource.originalFilename, privacy: .public)")

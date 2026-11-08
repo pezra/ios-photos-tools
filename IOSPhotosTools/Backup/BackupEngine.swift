@@ -199,6 +199,21 @@ actor BackupEngine {
                 continue
             }
 
+            // Same name and size is the same file, so nothing is read from Photos or the bucket.
+            if plan.compares, let inBucket {
+                switch BackupPaths.match(resource, storedSizes: [inBucket.size]) {
+                case .same:
+                    store.markDone(row.id, path: row.path, sha256: nil)
+                    continue
+                case .different:
+                    // Not this photo's own file (that was dealt with above), so it keeps the name.
+                    store.retirePaths(forAsset: assetID)
+                    return BackupPaths.Failure.nameTaken(row.path)
+                case .compare:
+                    break
+                }
+            }
+
             let stagedName = UUID().uuidString
             let file = Staging.url(for: stagedName)
             let sha256: String?
