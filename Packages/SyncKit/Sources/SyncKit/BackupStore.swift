@@ -282,6 +282,9 @@ public final class BackupStore: @unchecked Sendable {
     public func reset() {
         locked {
             execute("DELETE FROM resources WHERE state != ?", [ResourceState.uploading.rawValue])
+            // These can't be stopped, and may be headed for the old bucket, so finishing mustn't
+            // count: they're sent again instead.
+            execute("UPDATE resources SET superseded = 1 WHERE state = ?", [ResourceState.uploading.rawValue])
             execute("DELETE FROM assets")
         }
         forgetBucketContents()

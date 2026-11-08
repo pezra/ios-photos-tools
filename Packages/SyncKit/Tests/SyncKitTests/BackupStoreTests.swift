@@ -173,6 +173,17 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertNil(store.completedAssets()["a"])
     }
 
+    func testUploadFinishingAfterForgettingHistoryIsSentAgain() {
+        open()
+        add([row("a#1", "a", "2026/A.HEIC"), row("a#2", "a", "2026/A.MOV")], asset: "a")
+        upload("a#1")
+        store.reset()
+        store.markDone("a#1")
+        XCTAssertEqual(state("a", "a#1"), .pending)
+        XCTAssertFalse(store.isInBucket("2026/A.HEIC"))
+        XCTAssertNil(store.completedAssets()["a"])
+    }
+
     // MARK: - Files that are gone
 
     func testRevertedEditLetsItsPhotoComplete() {
