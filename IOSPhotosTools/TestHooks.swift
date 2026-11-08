@@ -1,5 +1,7 @@
 #if DEBUG
+import CoreImage
 import Foundation
+import Photos
 
 /// Lets the simulator scripts in `scripts/sim` set the app up without tapping through settings.
 /// Debug builds only. Read from the environment at launch, which `xcrun simctl launch` passes on
@@ -10,6 +12,8 @@ import Foundation
 ///   Saved as if typed into settings.
 /// - `PT_TEST_DRIVE`: the name of a folder in the app's Documents to use as the drive, created if
 ///   needed. Standing in for a folder chosen on a USB drive.
+/// - `PT_TEST_EDIT`: a number of photos to edit (colours inverted), the newest first. Edited again
+///   each time, so each launch gives them new edited versions.
 /// - `PT_TEST_FORGET_AFTER`: a number of photos. Once the bucket pass has registered that many,
 ///   "Forget backup history" is tapped, while the last of them is still being staged.
 enum TestHooks {
@@ -51,6 +55,46 @@ enum TestHooks {
         }
         if let name = environment["PT_TEST_DRIVE"] {
             applyDrive(name)
+        }
+        if let count = environment["PT_TEST_EDIT"].flatMap(Int.init) {
+            Task.detached { await editPhotos(count) }
+        }
+    }
+
+    private static func editPhotos(_ count: Int) async {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.fetchLimit = count
+        let assets = PHAsset.fetchAssets(with: .image, options: options)
+        for index in 0..<assets.count {
+            let asset = assets.object(at: index)
+            do {
+                try await edit(asset)
+                Log.background.info("Test hook: edited \(asset.localIdentifier, privacy: .public)")
+            } catch {
+                Log.background.error("Test hook: couldn't edit \(asset.localIdentifier, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+    }
+
+    private static func edit(_ asset: PHAsset) async throws {
+        let input: PHContentEditingInput = try await withCheckedThrowingContinuation { continuation in
+            let options = PHContentEditingInputRequestOptions()
+            options.canHandleAdjustmentData = { _ in false }
+            asset.requestContentEditingInput(with: options) { input, info in
+                if let input { continuation.resume(returning: input) } else {
+                    continuation.resume(throwing: info[PHContentEditingInputErrorKey] as? Error ?? CocoaError(.fileReadUnknown))
+                }
+            }
+        }
+        guard let url = input.fullSizeImageURL, let image = CIImage(contentsOf: url) else { throw CocoaError(.fileReadUnknown) }
+        let output = PHContentEditingOutput(contentEditingInput: input)
+        output.adjustmentData = PHAdjustmentData(formatIdentifier: "org.barelyenough.ios-photos-tools.test",
+                                                 formatVersion: "1", data: Data(UUID().uuidString.utf8))
+        try CIContext().writeJPEGRepresentation(of: image.applyingFilter("CIColorInvert"), to: output.renderedContentURL,
+                                                colorSpace: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!)
+        try await PHPhotoLibrary.shared().performChanges {
+            PHAssetChangeRequest(for: asset).contentEditingOutput = output
         }
     }
 
