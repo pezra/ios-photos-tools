@@ -216,15 +216,7 @@ public final class BackupStore: @unchecked Sendable {
     }
 
     public func markDone(_ id: String) {
-        locked {
-            guard !resetSuperseded(id) else { return }
-            execute("UPDATE resources SET state = ?, staged_name = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
-                    [ResourceState.done.rawValue, now, id])
-            execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id = ? AND on_bucket = 0", [id])
-            if sqlite3_changes(db) > 0 { bumpHandledVersion() }
-            guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
-            completeAssetIfFinished(assetID)
-        }
+        locked { done(id) }
     }
 
     public func markFailed(_ id: String, error: String) {
@@ -378,7 +370,11 @@ public final class BackupStore: @unchecked Sendable {
     /// gets new ones and is backed up again. The old paths stay handled: copies may already be
     /// there, and those must not be imported as if they were someone else's pictures.
     public func retirePaths(forAsset assetID: String) {
-        _ = locked { handledTransaction {
+        locked { retire(assetID) }
+    }
+
+    private func retire(_ assetID: String) {
+        _ = handledTransaction {
             execute("UPDATE handled_paths SET resource_id = NULL, asset_id = NULL, on_drive = 0, on_bucket = 0 WHERE asset_id = ?", [assetID])
             // Kept as pending so the asset can't count as complete until these are backed up again,
             // even if another of its files finishes uploading in the meantime.
@@ -389,15 +385,17 @@ public final class BackupStore: @unchecked Sendable {
                     [assetID, ResourceState.uploading.rawValue])
             execute("DELETE FROM assets WHERE id = ?", [assetID])
             execute("DELETE FROM drive_assets WHERE asset_id = ?", [assetID])
-        } }
+        }
     }
 
-    /// `retirePaths` for an upload the bucket refused because the key already exists.
+    /// `retirePaths` for an upload the bucket refused because the key already exists. All in one
+    /// go, so another of the photo's files finishing can't complete it part way through.
     public func retirePaths(forResource resourceID: String) {
-        let assetID = locked { query("SELECT asset_id FROM resources WHERE id = ?", [resourceID]) { text($0, 0) }.first ?? nil }
-        guard let assetID else { return }
-        locked { execute("UPDATE resources SET state = ?, staged_name = NULL WHERE id = ?", [ResourceState.pending.rawValue, resourceID]) }
-        retirePaths(forAsset: assetID)
+        locked {
+            guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [resourceID], { text($0, 0) }).first ?? nil else { return }
+            execute("UPDATE resources SET state = ?, staged_name = NULL WHERE id = ?", [ResourceState.pending.rawValue, resourceID])
+            retire(assetID)
+        }
     }
 
     public func isOnDrive(_ path: String) -> Bool {
@@ -421,8 +419,10 @@ public final class BackupStore: @unchecked Sendable {
 
     /// Records the upload of an edited version that turned out to be in the bucket already.
     public func markDone(_ id: String, sha256: String?) {
-        locked { execute("UPDATE resources SET sha256 = ? WHERE id = ?", [sha256, id]) }
-        markDone(id)
+        locked {
+            execute("UPDATE resources SET sha256 = ? WHERE id = ?", [sha256, id])
+            done(id)
+        }
     }
 
     /// Normalized forms of every path that's been backed up or imported.
@@ -678,6 +678,16 @@ public final class BackupStore: @unchecked Sendable {
 
     private func inventoryEntry(_ stmt: OpaquePointer) -> InventoryEntry {
         InventoryEntry(source: StorageSource(rawValue: text(stmt, 0) ?? "") ?? .drive, path: text(stmt, 1) ?? "", size: sqlite3_column_int64(stmt, 2))
+    }
+
+    private func done(_ id: String) {
+        guard !resetSuperseded(id) else { return }
+        execute("UPDATE resources SET state = ?, staged_name = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
+                [ResourceState.done.rawValue, now, id])
+        execute("UPDATE handled_paths SET on_bucket = 1 WHERE resource_id = ? AND on_bucket = 0", [id])
+        if sqlite3_changes(db) > 0 { bumpHandledVersion() }
+        guard let assetID = query("SELECT asset_id FROM resources WHERE id = ?", [id], { text($0, 0) }).first ?? nil else { return }
+        completeAssetIfFinished(assetID)
     }
 
     private func completeAssetIfFinished(_ assetID: String) {
