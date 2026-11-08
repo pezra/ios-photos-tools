@@ -139,9 +139,11 @@ enum StorageInventory {
         "conditional-writes-\(identity(client: client, prefix: prefix))"
     }
 
-    /// Whether this bucket has ever been listed, which name collisions are checked against.
+    /// Whether the listing kept, which name collisions are checked against, is this bucket's. It's
+    /// only kept for the last bucket listed, so one listed before a switch has to be listed again.
     static func hasListedS3(client: S3Client, prefix: String) -> Bool {
-        store.meta(listedKey(client: client, prefix: prefix)) != nil
+        store.meta("current-bucket") == identity(client: client, prefix: prefix)
+            && store.meta(listedKey(client: client, prefix: prefix)) != nil
     }
 
     private static func mergeHandledPaths(fromS3 client: S3Client, prefix: String, session: URLSession) async throws {
