@@ -227,11 +227,11 @@ actor LibrarySyncEngine {
             }
         }
         if cancelled { throw CancellationError() }
-        guard store.replaceImportedAssets(found) else { throw StorageInventory.Failure.couldNotSave }
+        guard store.replaceImportedAssets(found) else { throw BackupStore.Failure.couldNotSave }
 
         let tags = Set(found.map(\.tag))
         let importedPaths = store.inventory().map(\.path).filter { tags.contains(LibraryPath.tag(for: $0)) }
-        guard store.markImported(paths: importedPaths) else { throw StorageInventory.Failure.couldNotSave }
+        guard store.markImported(paths: importedPaths) else { throw BackupStore.Failure.couldNotSave }
         store.setMeta("imports-scanned", "1")
     }
 
@@ -312,7 +312,7 @@ actor LibrarySyncEngine {
         do {
             let created = try await Self.create(items, albums: albums)
             guard store.recordImports(created) else {
-                return ImportOutcome(failed: items.count, lastError: StorageInventory.Failure.couldNotSave.localizedDescription)
+                return ImportOutcome(failed: items.count, lastError: BackupStore.Failure.couldNotSave.localizedDescription)
             }
             // Photos gave these no ID, so they can't be recorded as imported.
             let recorded = Set(created.map(\.path))

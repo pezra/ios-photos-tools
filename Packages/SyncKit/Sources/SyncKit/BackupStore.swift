@@ -806,3 +806,13 @@ public final class BackupStore: @unchecked Sendable {
         sqlite3_column_text(stmt, column).map { String(cString: $0) }
     }
 }
+
+extension BackupStore {
+    public enum Failure: Error, LocalizedError {
+        case couldNotSave
+
+        public var errorDescription: String? {
+            "Couldn't save the record of what's in storage. This phone may be out of space."
+        }
+    }
+}

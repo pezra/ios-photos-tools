@@ -4,14 +4,6 @@ import Foundation
 /// task, or the drive being unplugged) carries on from there next time instead of starting over.
 /// A big drive takes minutes to list, mostly in reading each file's details.
 public struct DriveListing {
-    public enum Failure: Error, LocalizedError {
-        case couldNotSave
-
-        public var errorDescription: String? {
-            "Couldn't save the record of what's in storage. This phone may be out of space."
-        }
-    }
-
     /// How far a listing has got. Folders are listed one at a time, each in name order, so the
     /// place in one stays put between passes.
     private struct State: Codable {
@@ -73,7 +65,7 @@ public struct DriveListing {
             /// so being stopped in between can't list them twice.
             func save(after: String?, finished: Bool = false) throws {
                 guard store.addInventory(source: .drive, entries: batch, replacingFolder: replacing ? folder : nil) else {
-                    throw Failure.couldNotSave
+                    throw BackupStore.Failure.couldNotSave
                 }
                 state.found += batch.count
                 state.pending += subfolders
@@ -117,7 +109,7 @@ public struct DriveListing {
             await progress?(state.found)
         }
 
-        guard store.keepInventory(source: .drive, onlyInFolders: Set(state.folders)) else { throw Failure.couldNotSave }
+        guard store.keepInventory(source: .drive, onlyInFolders: Set(state.folders)) else { throw BackupStore.Failure.couldNotSave }
         store.setMeta(key, "")
         store.setMeta(finishedKey, String(Date().timeIntervalSince1970))
     }

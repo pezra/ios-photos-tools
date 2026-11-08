@@ -12,14 +12,6 @@ enum StorageInventory {
     /// How many changes to let build up before updating the copies in storage during a pass.
     private static let writeInterval = 500
 
-    enum Failure: Error, LocalizedError {
-        case couldNotSave
-
-        var errorDescription: String? {
-            "Couldn't save the record of what's in storage. This phone may be out of space."
-        }
-    }
-
     // MARK: - Drive
 
     /// A listing this recent is used as it is, so a sync straight after a drive backup doesn't
@@ -40,7 +32,7 @@ enum StorageInventory {
         guard store.meta(key) == nil else { return }
         let file = root.appending(path: HandledPathsFile.relativePath)
         if FileManager.default.fileExists(atPath: file.path) {
-            guard store.mergeHandled(HandledPathsFile.decode(try Data(contentsOf: file)), from: .drive) else { throw Failure.couldNotSave }
+            guard store.mergeHandled(HandledPathsFile.decode(try Data(contentsOf: file)), from: .drive) else { throw BackupStore.Failure.couldNotSave }
         }
         store.setMeta(key, "1")
     }
@@ -102,7 +94,7 @@ enum StorageInventory {
             let path = String(object.key.dropFirst(root.count))
             return LibraryPath.isLibraryContent(path) ? InventoryEntry(source: .s3, path: path, size: object.size) : nil
         }
-        guard store.replaceInventory(source: .s3, entries: entries) else { throw Failure.couldNotSave }
+        guard store.replaceInventory(source: .s3, entries: entries) else { throw BackupStore.Failure.couldNotSave }
         store.setMeta(listedKey(client: client, prefix: prefix), String(Date().timeIntervalSince1970))
     }
 
@@ -161,7 +153,7 @@ enum StorageInventory {
         guard store.meta(key) == nil else { return }
         do {
             let data = try await client.getObject(key: handledKey(prefix: prefix), session: session)
-            guard store.mergeHandled(HandledPathsFile.decode(data), from: .s3) else { throw Failure.couldNotSave }
+            guard store.mergeHandled(HandledPathsFile.decode(data), from: .s3) else { throw BackupStore.Failure.couldNotSave }
         } catch let error as S3Error where error.status == 404 {
             // Nothing there yet.
         }
